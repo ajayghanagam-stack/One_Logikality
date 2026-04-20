@@ -113,12 +113,16 @@ for i in $(seq 1 90); do
 done
 
 # ------------------------------------------------------------------
-# [2/5] Apply Alembic migrations (no-op in Phase 0 — first migration lands in Step 1)
+# [2/5] Apply Alembic migrations + seed demo data
 # ------------------------------------------------------------------
 log_step "[2/5] Applying Alembic migrations..."
 cd "$BACKEND_DIR"
 "$VENV_PY" -m alembic upgrade head
 log_ok "       Migrations applied"
+
+log_step "       Seeding demo data..."
+"$VENV_PY" -m scripts.seed
+log_ok "       Seed complete"
 
 # ------------------------------------------------------------------
 # [3/5] Start FastAPI
