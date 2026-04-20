@@ -12,7 +12,10 @@ pydantic==2.12.5
 pydantic-settings>=2.0
 
 # Database
-SQLAlchemy==2.0.48
+# The [asyncio] extra pulls in greenlet, which SQLAlchemy's async engine
+# requires. On Apple Silicon the plain SQLAlchemy wheel does not install
+# greenlet transitively, so request the extra explicitly.
+SQLAlchemy[asyncio]==2.0.48
 asyncpg==0.30.0
 alembic==1.14.1
 
