@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 import { colors, typography } from "@/lib/brand";
+import { AuthProvider } from "@/lib/auth";
 
 export const metadata: Metadata = {
   title: "One Logikality",
@@ -21,7 +22,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           fontWeight: typography.fontWeight.body,
         }}
       >
-        {children}
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );
