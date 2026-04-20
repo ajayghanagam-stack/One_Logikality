@@ -112,6 +112,62 @@ Working summary (must stay in sync with the PDF — if there is a conflict, the 
 - **Files over folders** for small features — don't create deep nesting for single-page sections
 - **Icons** are inline SVG, not an icon library, for crisp rendering at any scale
 
+## Development
+
+Full local stack (Postgres :5437, Temporal :7234 + UI :8086, FastAPI :8001, Temporal worker, Next.js :9999):
+
+```bash
+./start-dev.sh                     # full bring-up; Ctrl+C tears everything down
+```
+
+One-time setup:
+
+```bash
+cp .env.example .env
+cd backend && python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && cd ..
+cd frontend && npm install && cd ..
+npm install                        # repo-root tooling: lefthook + commitlint
+brew install gitleaks              # macOS; `scoop install gitleaks` on Windows
+```
+
+Backend (`cd backend`, venv active):
+
+```bash
+.venv/bin/uvicorn app.main:app --reload --port 8001
+.venv/bin/alembic upgrade head
+.venv/bin/alembic revision --autogenerate -m "<message>"
+.venv/bin/pytest                               # all tests
+.venv/bin/pytest tests/test_health.py::test_x  # single test
+.venv/bin/ruff check . && .venv/bin/ruff format .
+```
+
+Frontend (`cd frontend`):
+
+```bash
+npm run dev          # next dev -p 9999
+npm run build
+npm run lint         # eslint .
+npm run test         # vitest run
+npm run test:watch
+```
+
+Git hooks run automatically via lefthook (installed by the root `npm install`): gitleaks + ruff + eslint on staged files pre-commit, commitlint on the message. Use Conventional Commits (`feat(...)`, `fix(...)`, `chore(...)`, etc.).
+
+## Code map
+
+Where the moving parts live. See [docs/TechStack.md](./docs/TechStack.md) for why.
+
+- `backend/app/main.py` — FastAPI entry, `/health`, router wiring
+- `backend/app/config.py` — settings from `.env` (pydantic-settings)
+- `backend/app/adapters/{storage,queue,llm}.py` — **driver abstractions**; every env-switched integration (local FS vs S3, Temporal vs background tasks, LiteLLM providers) must go through these. Never branch on env vars directly in business code (see TechStack §15)
+- `backend/app/pipeline/worker.py` — Temporal worker process; task queue = `ecv` today, more per micro-app later (see TechStack §5)
+- `backend/alembic/` — schema migrations; run on every bring-up
+- `backend/tests/` — pytest + pytest-asyncio; `asyncio_mode = "auto"` in `pyproject.toml`
+- `frontend/app/` — Next.js App Router pages
+- `frontend/lib/brand.ts` — Logikality palette + typography tokens; **the only source of brand values** for inline styles
+- `frontend/public/` — approved Logikality logo files (PDF-sourced — never recreate as SVG)
+- `docker-compose.yml` — `db`, `temporal-db`, `temporal`, `temporal-ui`; ports offset from Title Intelligence Hub so both repos can run side by side
+
 ## Scope distinction: demo vs production
 
 The current repo is a **prototype for stakeholder demos**. Several patterns exist only for demo purposes:
