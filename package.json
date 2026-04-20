@@ -1,0 +1,14 @@
+{
+  "name": "one-logikality",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Root tooling package for One Logikality. Hosts lefthook + commitlint; the real app code lives in backend/ and frontend/.",
+  "scripts": {
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.5.0",
+    "@commitlint/config-conventional": "^19.5.0",
+    "lefthook": "^1.8.0"
+  }
+}

@@ -1,0 +1,36 @@
+# Git hooks for One Logikality.
+# Installed by `npm install` at the repo root (via the `prepare` script).
+#
+# Prereqs:
+#   - backend/.venv created with `pip install -r backend/requirements.txt`
+#     (gives us ruff)
+#   - gitleaks on PATH: `brew install gitleaks` (Mac) or `scoop install gitleaks` (Windows)
+#   - Node 20 + a top-level `npm install` (gives us lefthook + commitlint)
+#
+# Windows users run this under Git Bash or WSL2; venv bin path is .venv/bin
+# under WSL2 and .venv/Scripts under native Git Bash — if you hit a "ruff not
+# found" error on Git Bash, prefer WSL2 (see docs/TechStack.md §13).
+
+pre-commit:
+  parallel: true
+  commands:
+    gitleaks:
+      # Scans staged changes for secrets before they land in a commit.
+      run: gitleaks protect --staged --redact --no-banner
+    ruff-check:
+      root: backend/
+      glob: "*.py"
+      run: .venv/bin/ruff check {staged_files}
+    ruff-format:
+      root: backend/
+      glob: "*.py"
+      run: .venv/bin/ruff format --check {staged_files}
+    eslint:
+      root: frontend/
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs}"
+      run: npx --no-install eslint {staged_files}
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx --no-install commitlint --edit {1}
