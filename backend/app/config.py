@@ -9,6 +9,7 @@ startup rather than failing silently later.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -18,10 +19,15 @@ log = logging.getLogger(__name__)
 
 INSECURE_JWT_DEFAULT = "dev-insecure-change-me-before-production"
 
+# Repo root is two parents up from backend/app/config.py. Anchoring on __file__
+# means the same .env is found no matter what cwd the process was started in
+# (uvicorn from backend/, pytest from backend/, worker from backend/, etc).
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=REPO_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
