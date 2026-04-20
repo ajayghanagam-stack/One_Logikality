@@ -5,6 +5,11 @@
  * submit button label, and the route to push on success. Both portals
  * POST the same /api/auth/login; which destination we navigate to after
  * a successful login depends on the returned role.
+ *
+ * Visual design mirrors Title Intelligence Hub: a soft white card with
+ * shadow, "Welcome back" headline, label-above-input layout, primary CTA,
+ * and a forgot-password affordance. Keeps the two Logikality products
+ * visually consistent per CLAUDE.md.
  */
 
 import { useRouter } from "next/navigation";
@@ -14,9 +19,9 @@ import { colors, typography } from "@/lib/brand";
 import { ApiError, useAuth, type Role } from "@/lib/auth";
 
 type Props = {
-  /** Heading above the form, e.g. "Customer sign-in". */
-  heading: string;
-  /** Subtext shown under the heading. */
+  /** Card heading — typically "Welcome back". */
+  heading?: string;
+  /** Card subheading, e.g. "Sign in to continue". */
   subheading?: string;
   /** Submit button label. */
   submitLabel?: string;
@@ -29,7 +34,7 @@ type Props = {
 };
 
 export function LoginForm({
-  heading,
+  heading = "Welcome back",
   subheading,
   submitLabel = "Sign in",
   allowedRoles,
@@ -65,110 +70,168 @@ export function LoginForm({
   }
 
   return (
-    <form
-      onSubmit={onSubmit}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 16,
-        width: "100%",
-        maxWidth: 360,
-      }}
-    >
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <h1
-          style={{
-            margin: 0,
-            fontSize: 24,
-            fontWeight: typography.fontWeight.headline,
-            color: colors.charcoal,
-          }}
-        >
-          {heading}
-        </h1>
-        {subheading ? (
-          <p style={{ margin: 0, color: colors.darkGray, fontSize: 14 }}>{subheading}</p>
-        ) : null}
+    <div style={cardStyle}>
+      <div style={cardHeaderStyle}>
+        <h1 style={titleStyle}>{heading}</h1>
+        {subheading ? <p style={subtitleStyle}>{subheading}</p> : null}
       </div>
 
-      <label style={labelStyle}>
-        <span style={labelTextStyle}>Email</span>
-        <input
-          type="email"
-          autoComplete="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          disabled={submitting}
-          style={inputStyle}
-        />
-      </label>
+      <form onSubmit={onSubmit} style={formStyle}>
+        <div style={fieldStyle}>
+          <label htmlFor="email" style={labelStyle}>
+            Email
+          </label>
+          <input
+            id="email"
+            type="email"
+            autoComplete="email"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={submitting}
+            placeholder="name@company.com"
+            style={inputStyle}
+          />
+        </div>
 
-      <label style={labelStyle}>
-        <span style={labelTextStyle}>Password</span>
-        <input
-          type="password"
-          autoComplete="current-password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          disabled={submitting}
-          style={inputStyle}
-        />
-      </label>
+        <div style={fieldStyle}>
+          <div style={labelRowStyle}>
+            <label htmlFor="password" style={labelStyle}>
+              Password
+            </label>
+            <span style={forgotStyle} aria-disabled>
+              Forgot password?
+            </span>
+          </div>
+          <input
+            id="password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={submitting}
+            placeholder="Enter your password"
+            style={inputStyle}
+          />
+        </div>
 
-      {error ? (
-        <div
-          role="alert"
+        {error ? (
+          <div role="alert" style={errorStyle}>
+            {error}
+          </div>
+        ) : null}
+
+        <button
+          type="submit"
+          disabled={submitting}
           style={{
-            backgroundColor: "#FDECEC",
-            color: "#8A1C1C",
-            borderRadius: 6,
-            padding: "8px 12px",
-            fontSize: 14,
+            ...buttonStyle,
+            cursor: submitting ? "not-allowed" : "pointer",
+            opacity: submitting ? 0.75 : 1,
           }}
         >
-          {error}
-        </div>
-      ) : null}
-
-      <button
-        type="submit"
-        disabled={submitting}
-        style={{
-          backgroundColor: colors.teal,
-          color: colors.white,
-          border: "none",
-          borderRadius: 6,
-          padding: "10px 16px",
-          fontSize: 15,
-          fontWeight: typography.fontWeight.subheading,
-          cursor: submitting ? "not-allowed" : "pointer",
-          opacity: submitting ? 0.7 : 1,
-        }}
-      >
-        {submitting ? "Signing in…" : submitLabel}
-      </button>
-    </form>
+          {submitting ? "Signing in…" : submitLabel}
+        </button>
+      </form>
+    </div>
   );
 }
 
-const labelStyle = {
-  display: "flex",
-  flexDirection: "column" as const,
-  gap: 4,
+/* ----- style objects ------------------------------------------------- */
+
+const cardStyle: React.CSSProperties = {
+  backgroundColor: colors.white,
+  borderRadius: 14,
+  padding: "28px 28px 32px",
+  boxShadow:
+    "0 10px 30px rgba(26,26,46,0.08), 0 2px 6px rgba(26,26,46,0.04)",
+  border: "1px solid #EEF0F4",
 };
-const labelTextStyle = {
+
+const cardHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  paddingBottom: 16,
+};
+
+const titleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 24,
+  fontWeight: typography.fontWeight.headline,
+  color: colors.charcoal,
+  lineHeight: 1.2,
+};
+
+const subtitleStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 14,
+  color: colors.darkGray,
+  lineHeight: 1.5,
+};
+
+const formStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 16,
+};
+
+const fieldStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const labelRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+};
+
+const labelStyle: React.CSSProperties = {
   fontSize: 13,
   fontWeight: typography.fontWeight.subheading,
-  color: colors.darkGray,
+  color: colors.charcoal,
 };
-const inputStyle = {
-  border: `1px solid #D6D8DD`,
-  borderRadius: 6,
-  padding: "9px 12px",
+
+const forgotStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: colors.darkGray,
+  opacity: 0.7,
+};
+
+const inputStyle: React.CSSProperties = {
+  border: "1px solid #D6D8DD",
+  borderRadius: 8,
+  padding: "10px 12px",
   fontSize: 15,
   backgroundColor: colors.white,
   color: colors.charcoal,
   fontFamily: "inherit",
+  outline: "none",
+};
+
+const errorStyle: React.CSSProperties = {
+  backgroundColor: "#FDECEC",
+  color: "#8A1C1C",
+  borderRadius: 8,
+  padding: "10px 12px",
+  fontSize: 13,
+  lineHeight: 1.4,
+};
+
+const buttonStyle: React.CSSProperties = {
+  backgroundColor: colors.teal,
+  color: colors.white,
+  border: "none",
+  borderRadius: 8,
+  padding: "11px 16px",
+  fontSize: 15,
+  fontWeight: typography.fontWeight.subheading,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+  width: "100%",
 };
