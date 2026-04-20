@@ -43,9 +43,7 @@ class Settings(BaseSettings):
     jwt_expiration_minutes: int = Field(alias="JWT_EXPIRATION_MINUTES", default=1440)
 
     # Storage
-    storage_provider: Literal["local", "s3"] = Field(
-        alias="STORAGE_PROVIDER", default="local"
-    )
+    storage_provider: Literal["local", "s3"] = Field(alias="STORAGE_PROVIDER", default="local")
     storage_path: str = Field(alias="STORAGE_PATH", default="./storage")
 
     # Pipeline orchestration
