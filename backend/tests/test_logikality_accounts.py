@@ -334,3 +334,80 @@ async def test_create_account_rejects_unknown_app_id(client: AsyncClient, seeded
     )
     assert resp.status_code == 400
     assert "nonsense" in resp.json()["detail"]
+
+
+# --- US-1.7 (partial): DELETE /api/logikality/accounts/{id} ------------
+
+
+async def test_delete_account_requires_auth(client: AsyncClient) -> None:
+    resp = await client.delete(f"/api/logikality/accounts/{uuid.uuid4()}")
+    assert resp.status_code == 401
+
+
+async def test_delete_account_rejects_customer_admin(client: AsyncClient, seeded) -> None:
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.delete(
+        f"/api/logikality/accounts/{seeded['org_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_delete_account_unknown_id_returns_404(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.delete(
+        f"/api/logikality/accounts/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_delete_account_cascades_users_and_subscriptions(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    # Fresh org with a primary admin + one extra subscription so we're
+    # actually asserting the cascade, not just an empty org.
+    suffix = uuid.uuid4().hex[:8]
+    create = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={**_create_payload(suffix), "subscribed_apps": ["title-search"]},
+    )
+    assert create.status_code == 201, create.text
+    account_id = create.json()["account"]["id"]
+
+    # Sanity-check: list endpoint sees the new org with 1 user + 2 subs
+    # (title-search + auto-added ECV).
+    listed = await client.get(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    match = next(r for r in listed.json() if r["id"] == account_id)
+    assert match["user_count"] == 1
+    assert match["subscription_count"] == 2
+
+    resp = await client.delete(
+        f"/api/logikality/accounts/{account_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204
+
+    # Org is gone.
+    after = await client.get(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert all(r["id"] != account_id for r in after.json())
+
+    # Cascades worked: the primary admin can't log in anymore because
+    # their user row was removed with the org.
+    login = await client.post(
+        "/api/auth/login",
+        json={
+            "email": f"wendy-{suffix}@widget.example.com",
+            "password": create.json()["temp_password"],
+        },
+    )
+    assert login.status_code == 401

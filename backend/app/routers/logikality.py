@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import re
 import secrets
+import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -248,6 +249,37 @@ async def create_account(
         primary_admin_email=admin_user.email,
         temp_password=temp_password,
     )
+
+
+@router.delete(
+    "/accounts/{org_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_account(
+    org_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_platform_admin)],
+) -> Response:
+    """Permanently delete a customer org and everything under it.
+
+    `users.org_id` and `app_subscriptions.org_id` are `ON DELETE CASCADE`
+    (see migrations 0001/0003), so a single `DELETE FROM orgs` removes
+    the users and subscription rows in the same statement. No soft-delete
+    here by design — a recovery flow would need its own explicit story
+    (archived flag + restore endpoint), not a quiet tombstone.
+
+    Returns 404 (not 204) when the id doesn't exist so the platform admin
+    sees a clear error if they click Delete on a row that was already
+    removed in another tab.
+    """
+    result = await session.execute(delete(Org).where(Org.id == org_id))
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="organization not found",
+        )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _slugify(name: str) -> str:
