@@ -62,8 +62,11 @@ async def seeded() -> AsyncIterator[SeededUsers]:
     async with SessionLocal() as session:
         # Runs as postgres (superuser), so bypasses RLS for seeding.
         await session.execute(
-            text("INSERT INTO orgs (id, name, type) VALUES (:id, :name, 'Mortgage Lender')"),
-            {"id": org_id, "name": f"Test Org {suffix}"},
+            text(
+                "INSERT INTO orgs (id, name, slug, type) "
+                "VALUES (:id, :name, :slug, 'Mortgage Lender')"
+            ),
+            {"id": org_id, "name": f"Test Org {suffix}", "slug": f"test-{suffix}"},
         )
         await session.execute(
             text(

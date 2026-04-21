@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db import get_session, set_tenant_context
 from app.deps import get_current_user
@@ -43,6 +44,9 @@ class UserOut(BaseModel):
     full_name: str
     role: str
     org_id: str | None
+    # URL-friendly org identifier used by the customer portal at /{slug}/*.
+    # Null for platform_admin users (they route under /logikality/*).
+    org_slug: str | None
     is_primary_admin: bool
 
     @classmethod
@@ -53,6 +57,7 @@ class UserOut(BaseModel):
             full_name=user.full_name,
             role=user.role,
             org_id=str(user.org_id) if user.org_id else None,
+            org_slug=user.org.slug if user.org is not None else None,
             is_primary_admin=user.is_primary_admin,
         )
 
@@ -75,8 +80,12 @@ async def login(
     # superuser).
     await set_tenant_context(session, role="platform_admin")
 
+    # Eager-load the org relationship so UserOut.from_orm can emit the slug
+    # without a second round-trip.
     user = (
-        await session.execute(select(User).where(User.email == payload.email))
+        await session.execute(
+            select(User).options(selectinload(User.org)).where(User.email == payload.email)
+        )
     ).scalar_one_or_none()
 
     hash_to_check = user.password_hash if user is not None else _TIMING_SAFE_DECOY_HASH

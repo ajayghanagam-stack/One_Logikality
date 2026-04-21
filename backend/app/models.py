@@ -45,6 +45,10 @@ class Org(Base):
         server_default=func.gen_random_uuid(),
     )
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    # URL-friendly identifier used by the customer portal at /{slug}/*.
+    # Uniqueness + shape + the reserved `logikality` exclusion are enforced
+    # in the 0002 migration (constraint `orgs_slug_shape_check`).
+    slug: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     type: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

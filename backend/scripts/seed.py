@@ -68,6 +68,7 @@ async def seed() -> None:
             session,
             id=ACME_ORG_ID,
             name="Acme Mortgage Holdings",
+            slug="acme",
             type="Mortgage Lender",
         )
         platform_created = await _upsert_user(session, PLATFORM_ADMIN)
@@ -80,13 +81,14 @@ async def seed() -> None:
     print(f"  admin@acmemortgage.com     {'created' if acme_admin_created else '(existing)'}")
 
 
-async def _upsert_org(session, *, id: uuid.UUID, name: str, type: str) -> bool:
+async def _upsert_org(session, *, id: uuid.UUID, name: str, slug: str, type: str) -> bool:
     result = await session.execute(
         text(
-            "INSERT INTO orgs (id, name, type) VALUES (:id, :name, :type) "
+            "INSERT INTO orgs (id, name, slug, type) "
+            "VALUES (:id, :name, :slug, :type) "
             "ON CONFLICT (name) DO NOTHING RETURNING id"
         ),
-        {"id": id, "name": name, "type": type},
+        {"id": id, "name": name, "slug": slug, "type": type},
     )
     return result.first() is not None
 

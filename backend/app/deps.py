@@ -17,6 +17,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db import get_session, set_tenant_context
 from app.models import User
@@ -64,7 +65,13 @@ async def get_current_user(
         role=claims["role"],
     )
 
-    user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    # Eager-load Org so handlers (and UserOut.from_orm) can read the slug
+    # without triggering a lazy load on an async session.
+    user = (
+        await session.execute(
+            select(User).options(selectinload(User.org)).where(User.id == user_id)
+        )
+    ).scalar_one_or_none()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
