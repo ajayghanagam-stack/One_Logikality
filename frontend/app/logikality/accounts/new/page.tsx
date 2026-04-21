@@ -12,13 +12,17 @@
  *
  * Visual layout mirrors `one-logikality-demo`'s
  * /platform-admin/accounts/new: breadcrumb, amber icon-tile header,
- * section-card panels, two-column grids. Two deliberate divergences:
- *   - No password field — the demo lets the admin type a password,
- *     but our backend auto-generates a one-time temp password. The
- *     admin-section explainer flags this.
- *   - No subscribed-apps panel — subscription persistence lands in
- *     US-2.5; showing the panel here would fake a save that doesn't
- *     happen. A one-line note under the sections points at US-2.5.
+ * section-card panels, two-column grids, admin-typed password.
+ *
+ * DEMO AFFORDANCE — the platform admin types the customer admin's
+ * initial password (min 6 chars), matching the demo. When the full
+ * onboarding flow ships (email invite + forced first-login reset),
+ * drop the password input and revert to the server's auto-generated
+ * temp password. The backend accepts the empty case today so the
+ * revert is a frontend-only change.
+ *
+ * Still missing vs. the demo: no subscribed-apps panel — subscription
+ * persistence lands in US-2.5; showing it here would fake a save.
  *
  * Role enforcement: `useRequireRole` is a UX guard; the backend
  * gates the endpoint with `require_platform_admin`.
@@ -68,6 +72,7 @@ export default function NewAccountPage() {
   const [type, setType] = useState<OrgTypeLabel>(ORG_TYPES[0].label);
   const [adminName, setAdminName] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreateResponse | null>(null);
@@ -76,7 +81,10 @@ export default function NewAccountPage() {
   if (!ready) return null;
 
   const canSubmit =
-    name.trim().length > 0 && adminName.trim().length > 0 && adminEmail.trim().length > 0;
+    name.trim().length > 0 &&
+    adminName.trim().length > 0 &&
+    adminEmail.trim().length > 0 &&
+    adminPassword.length >= 6;
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -92,6 +100,9 @@ export default function NewAccountPage() {
           type,
           primary_admin_full_name: adminName.trim(),
           primary_admin_email: adminEmail.trim(),
+          // Demo affordance — remove this key when reverting to
+          // server-generated temp passwords (see page-level comment).
+          initial_password: adminPassword,
         },
       });
       setCreated(resp);
@@ -236,11 +247,29 @@ export default function NewAccountPage() {
                   placeholder="admin@acmemortgage.com"
                 />
               </Field>
-            </div>
-            <div style={noticeStyle}>
-              A one-time temporary password is generated on save and shown once on
-              the confirmation screen. Share it securely with the admin — they can
-              change it after signing in.
+              {/* Full-width password input, matching the demo. `gridColumn:
+                  1 / -1` spans both columns regardless of grid size so the
+                  input shape matches the other inputs above. */}
+              <div style={{ gridColumn: "1 / -1" }}>
+                <Field label="Password (minimum 6 characters)" htmlFor="admin-password">
+                  <input
+                    id="admin-password"
+                    type="password"
+                    value={adminPassword}
+                    onChange={(e) => setAdminPassword(e.target.value)}
+                    required
+                    minLength={6}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    style={inputStyle}
+                    placeholder="Set initial password"
+                  />
+                  <div style={fieldHintStyle}>
+                    Share this password securely with the admin. They can change it
+                    after signing in.
+                  </div>
+                </Field>
+              </div>
             </div>
           </section>
 
@@ -493,17 +522,6 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
   fontFamily: "inherit",
   boxSizing: "border-box",
-};
-
-const noticeStyle: React.CSSProperties = {
-  fontSize: 11,
-  color: chrome.mutedFg,
-  lineHeight: 1.5,
-  marginTop: 2,
-  padding: "10px 12px",
-  backgroundColor: chrome.amberBg,
-  border: `1px solid ${chrome.amberLight}`,
-  borderRadius: 8,
 };
 
 const phaseNoteStyle: React.CSSProperties = {
