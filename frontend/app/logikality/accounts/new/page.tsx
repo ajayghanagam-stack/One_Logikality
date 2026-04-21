@@ -21,8 +21,10 @@
  * temp password. The backend accepts the empty case today so the
  * revert is a frontend-only change.
  *
- * Still missing vs. the demo: no subscribed-apps panel — subscription
- * persistence lands in US-2.5; showing it here would fake a save.
+ * Subscribed apps are chosen here at create time (US-2.5 pulled forward):
+ * defaults are seeded from the selected org type, ECV is locked on, and
+ * the list is sent to the backend which persists one row per subscription
+ * in the same transaction as the org + primary admin.
  *
  * Role enforcement: `useRequireRole` is a UX guard; the backend
  * gates the endpoint with `require_platform_admin`.
@@ -33,6 +35,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { api, ApiError } from "@/lib/api";
+import { MICRO_APPS, ORG_TYPE_APP_DEFAULTS } from "@/lib/apps";
 import { useAuth, useRequireRole } from "@/lib/auth";
 import { chrome, typography } from "@/lib/brand";
 
@@ -73,10 +76,34 @@ export default function NewAccountPage() {
   const [adminName, setAdminName] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
+  // Subscribed micro-apps default to the org type's preset (Mortgage Lender
+  // gets the full stack, BPO gets ECV only, etc). ECV is always included by
+  // the backend regardless of what we send — we still keep it in the array
+  // so the "Subscribed" pill reads correctly in the UI.
+  const [subscribedApps, setSubscribedApps] = useState<readonly string[]>(
+    ORG_TYPE_APP_DEFAULTS[ORG_TYPES[0].label] ?? ["ecv"],
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreateResponse | null>(null);
   const [copied, setCopied] = useState(false);
+
+  function onTypeChange(next: OrgTypeLabel) {
+    setType(next);
+    // Reset subscriptions to the new type's defaults — matches the demo's
+    // behavior and avoids carrying over picks that don't make sense for a
+    // different org type (e.g. title-exam on a BPO).
+    setSubscribedApps(ORG_TYPE_APP_DEFAULTS[next] ?? ["ecv"]);
+  }
+
+  function toggleApp(id: string) {
+    // ECV is foundational — the row's Add/Remove button is already
+    // disabled; this guard is just belt-and-braces.
+    if (id === "ecv") return;
+    setSubscribedApps((prev) =>
+      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id],
+    );
+  }
 
   if (!ready) return null;
 
@@ -103,6 +130,7 @@ export default function NewAccountPage() {
           // Demo affordance — remove this key when reverting to
           // server-generated temp passwords (see page-level comment).
           initial_password: adminPassword,
+          subscribed_apps: [...subscribedApps],
         },
       });
       setCreated(resp);
@@ -197,7 +225,7 @@ export default function NewAccountPage() {
                 <select
                   id="org-type"
                   value={type}
-                  onChange={(e) => setType(e.target.value as OrgTypeLabel)}
+                  onChange={(e) => onTypeChange(e.target.value as OrgTypeLabel)}
                   required
                   style={{ ...inputStyle, cursor: "pointer" }}
                 >
@@ -273,11 +301,82 @@ export default function NewAccountPage() {
             </div>
           </section>
 
-          {/* Subscription management lands in US-2.5; flagging here so the
-              scope of this page is obvious to whoever opens it next. */}
-          <p style={phaseNoteStyle}>
-            App subscriptions are configured after the account is created (US-2.5).
-          </p>
+          {/* ——— Subscribed micro-apps (US-2.5 pulled forward) ——— */}
+          <section style={appsSectionStyle}>
+            <div style={appsHeaderStyle}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 15 }} aria-hidden="true">
+                  🧩
+                </span>
+                <h2 style={appsTitleStyle}>
+                  Subscribed apps ({subscribedApps.length})
+                </h2>
+              </div>
+              <span style={appsCaptionStyle}>
+                Defaults for {type} · ECV included
+              </span>
+            </div>
+            <div>
+              {MICRO_APPS.map((app, idx) => {
+                const isEcv = app.id === "ecv";
+                const isSubscribed = subscribedApps.includes(app.id);
+                // Last row omits the bottom border so the section card's own
+                // border carries the edge — matches the demo's visual.
+                const isLast = idx === MICRO_APPS.length - 1;
+                return (
+                  <div
+                    key={app.id}
+                    style={{
+                      ...appRowStyle,
+                      borderBottom: isLast ? "none" : `1px solid ${chrome.border}`,
+                    }}
+                  >
+                    <span style={{ fontSize: 22 }} aria-hidden="true">
+                      {app.icon}
+                    </span>
+                    <div style={{ flex: 1 }}>
+                      <div style={appNameStyle}>
+                        {app.name}
+                        {isEcv ? (
+                          <span style={requiredBadgeStyle}>Required</span>
+                        ) : null}
+                      </div>
+                      <div style={appDescStyle}>{app.desc}</div>
+                    </div>
+                    <span
+                      style={{
+                        ...pillBaseStyle,
+                        background: isSubscribed ? "#D1FAE5" : chrome.muted,
+                        border: `1px solid ${
+                          isSubscribed ? "#A7F3D0" : chrome.border
+                        }`,
+                        color: isSubscribed ? "#065F46" : chrome.mutedFg,
+                      }}
+                    >
+                      {isSubscribed ? "Subscribed" : "Not subscribed"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => toggleApp(app.id)}
+                      disabled={isEcv}
+                      style={{
+                        ...appBtnStyle,
+                        background: isSubscribed ? "#fff" : chrome.amber,
+                        color: isSubscribed ? destructiveRed : "#fff",
+                        border: isSubscribed
+                          ? `1px solid ${destructiveRed}40`
+                          : "none",
+                        cursor: isEcv ? "not-allowed" : "pointer",
+                        opacity: isEcv ? 0.5 : 1,
+                      }}
+                    >
+                      {isSubscribed ? "Remove" : "Add"}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
 
           {error ? (
             <div role="alert" style={errorStyle}>
@@ -524,11 +623,87 @@ const inputStyle: React.CSSProperties = {
   boxSizing: "border-box",
 };
 
-const phaseNoteStyle: React.CSSProperties = {
+// Destructive red for "Remove" buttons on already-subscribed rows. Matches
+// the demo's `BRAND.destructive` visual — kept as a local token since it's
+// the only surface in this app using it today.
+const destructiveRed = "#DC2626";
+
+const appsSectionStyle: React.CSSProperties = {
+  background: chrome.card,
+  border: `1px solid ${chrome.border}`,
+  borderRadius: 12,
+  boxShadow: "0 1px 3px rgba(20,18,14,0.04)",
+  overflow: "hidden",
+};
+
+const appsHeaderStyle: React.CSSProperties = {
+  padding: "14px 20px",
+  borderBottom: `1px solid ${chrome.border}`,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+};
+
+const appsTitleStyle: React.CSSProperties = {
+  fontSize: 14,
+  fontWeight: typography.fontWeight.subheading,
   margin: 0,
-  fontSize: 12,
+  color: chrome.charcoal,
+};
+
+const appsCaptionStyle: React.CSSProperties = {
+  fontSize: 11,
   color: chrome.mutedFg,
-  fontStyle: "italic",
+};
+
+const appRowStyle: React.CSSProperties = {
+  padding: "14px 20px",
+  display: "flex",
+  alignItems: "center",
+  gap: 14,
+};
+
+const appNameStyle: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 600,
+  color: chrome.charcoal,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+};
+
+const appDescStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: chrome.mutedFg,
+  marginTop: 2,
+};
+
+const requiredBadgeStyle: React.CSSProperties = {
+  fontSize: 9,
+  fontWeight: 700,
+  padding: "1px 7px",
+  borderRadius: 10,
+  background: chrome.amberLight,
+  color: chrome.amberDark,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+};
+
+const pillBaseStyle: React.CSSProperties = {
+  padding: "3px 10px",
+  borderRadius: 12,
+  fontSize: 10,
+  fontWeight: 700,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+};
+
+const appBtnStyle: React.CSSProperties = {
+  padding: "7px 14px",
+  fontSize: 11,
+  fontWeight: 600,
+  borderRadius: 6,
+  minWidth: 80,
 };
 
 const actionsStyle: React.CSSProperties = {
