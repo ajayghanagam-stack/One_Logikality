@@ -27,8 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps import require_customer_admin
-from app.models import User
+from app.models import APP_IDS, AppSubscription, User
 from app.security import hash_password
+
+# ECV is foundational — the backend forces it subscribed AND enabled for
+# every customer org. Customer admins can't disable it, mirroring the
+# invariant the platform-admin create/PUT flows already enforce.
+_REQUIRED_APP = "ecv"
 
 router = APIRouter(prefix="/api/customer-admin", tags=["customer-admin"])
 
@@ -199,3 +204,90 @@ async def remove_user(
     await session.delete(target)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- US-2.5 / US-2.6: app access ---------------------------------------
+
+
+class AppAccessRow(BaseModel):
+    """One row in the customer-admin App access page.
+
+    Every known micro-app appears in the response — `subscribed` says
+    whether the platform admin has provisioned it for this org;
+    `enabled` says whether the customer admin has turned it on for
+    their users. Apps without a subscription return `subscribed=false,
+    enabled=false`; the UI renders them as "Available to purchase".
+    """
+
+    id: str
+    subscribed: bool
+    enabled: bool
+
+
+@router.get("/apps", response_model=list[AppAccessRow])
+async def list_apps(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_customer_admin)],
+) -> list[AppAccessRow]:
+    stmt = select(AppSubscription).where(AppSubscription.org_id == admin.org_id)
+    subs = {row.app_id: row for row in (await session.execute(stmt)).scalars().all()}
+    # Always emit a row for every known app id (in catalog order) so the
+    # frontend doesn't have to cross-reference against its own list.
+    return [
+        AppAccessRow(
+            id=app_id,
+            subscribed=app_id in subs,
+            enabled=subs[app_id].enabled if app_id in subs else False,
+        )
+        for app_id in APP_IDS
+    ]
+
+
+class UpdateAppAccessRequest(BaseModel):
+    enabled: bool
+
+
+@router.patch("/apps/{app_id}", response_model=AppAccessRow)
+async def update_app_access(
+    app_id: str,
+    payload: UpdateAppAccessRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_customer_admin)],
+) -> AppAccessRow:
+    """Toggle `enabled` on an existing subscription.
+
+    Three rejections, in order:
+      - Unknown app id → 400 (before any DB touch).
+      - Attempt to disable ECV → 400 (foundational; platform-level invariant).
+      - App not subscribed for this org → 404 (subscriptions are
+        platform-admin-controlled; customer admin has no path to create
+        them here — that's what the "Contact sales" button is for).
+    """
+    if app_id not in APP_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown app id: {app_id}",
+        )
+    if app_id == _REQUIRED_APP and not payload.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ECV is required and cannot be disabled",
+        )
+
+    sub = (
+        await session.execute(
+            select(AppSubscription).where(
+                AppSubscription.org_id == admin.org_id,
+                AppSubscription.app_id == app_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if sub is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="app is not subscribed for this organization",
+        )
+
+    sub.enabled = payload.enabled
+    await session.commit()
+    return AppAccessRow(id=sub.app_id, subscribed=True, enabled=sub.enabled)
