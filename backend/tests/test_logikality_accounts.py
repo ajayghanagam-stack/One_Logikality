@@ -208,3 +208,56 @@ async def test_create_account_rejects_invalid_type(client: AsyncClient, seeded) 
         },
     )
     assert resp.status_code == 400
+
+
+# --- Demo affordance: admin-supplied initial_password ------------------
+# These exercise the temporary `initial_password` field on the create
+# request. When the full onboarding flow ships the field and these tests
+# should be removed together.
+
+
+async def test_create_account_accepts_admin_supplied_password(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    suffix = uuid.uuid4().hex[:8]
+    chosen_password = "demo-pass-1"  # > 6 chars, distinct from the generator's output
+    payload = {**_create_payload(suffix), "initial_password": chosen_password}
+
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    account_id = body["account"]["id"]
+
+    # Response echoes the chosen password verbatim (so the UI can render
+    # a confirmation card identically for both paths).
+    assert body["temp_password"] == chosen_password
+
+    try:
+        # Round-trip: the new admin logs in with the password the platform
+        # admin typed — proof the supplied value is what got hashed.
+        login = await client.post(
+            "/api/auth/login",
+            json={
+                "email": payload["primary_admin_email"],
+                "password": chosen_password,
+            },
+        )
+        assert login.status_code == 200, login.text
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_create_account_rejects_short_initial_password(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={**_create_payload(uuid.uuid4().hex[:8]), "initial_password": "short"},
+    )
+    # Pydantic `min_length=6` kicks in before the handler body runs.
+    assert resp.status_code == 422

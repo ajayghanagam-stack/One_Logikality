@@ -101,12 +101,20 @@ class CreateAccountRequest(BaseModel):
     validate by membership check in the handler and return 400 with a
     precise message. Pydantic's `EmailStr` catches most malformed emails
     before they reach the DB's unique constraint.
+
+    `initial_password` is a DEMO-GRADE affordance — the platform admin can
+    type the customer admin's starting password, matching the behavior in
+    `one-logikality-demo`. When absent the server falls back to generating
+    a one-time password. Once the full app ships (real email invites /
+    forced first-login password reset), delete this field and revert to
+    generate-only.
     """
 
     name: str = Field(min_length=1, max_length=120)
     type: str
     primary_admin_full_name: str = Field(min_length=1, max_length=120)
     primary_admin_email: EmailStr
+    initial_password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class CreateAccountResponse(BaseModel):
@@ -172,10 +180,12 @@ async def create_account(
             detail="a user with that email already exists",
         )
 
-    # 12 URL-safe chars ≈ 72 bits of entropy — plenty for a copy-paste-once
-    # bootstrap password. The customer admin is expected to change it on
-    # first login (US-2.1 lands the change-password flow).
-    temp_password = secrets.token_urlsafe(9)
+    # Admin-supplied password if provided (demo affordance — see
+    # CreateAccountRequest); otherwise 12 URL-safe chars ≈ 72 bits of
+    # entropy — plenty for a copy-paste-once bootstrap password. Either
+    # way the customer admin is expected to change it on first login
+    # (US-2.1 lands the change-password flow).
+    temp_password = payload.initial_password or secrets.token_urlsafe(9)
 
     org = Org(name=payload.name, slug=slug, type=payload.type)
     session.add(org)
