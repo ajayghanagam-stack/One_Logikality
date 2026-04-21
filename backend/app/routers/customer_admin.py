@@ -27,7 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps import require_customer_admin
-from app.models import APP_IDS, AppSubscription, User
+from app.models import APP_IDS, AppRuleOverride, AppSubscription, User
+from app.rules import (
+    LOAN_PROGRAM_IDS,
+    MICRO_APP_RULES,
+    RuleValue,
+    validate_rule_value,
+)
 from app.security import hash_password
 
 # ECV is foundational — the backend forces it subscribed AND enabled for
@@ -291,3 +297,160 @@ async def update_app_access(
     sub.enabled = payload.enabled
     await session.commit()
     return AppAccessRow(id=sub.app_id, subscribed=True, enabled=sub.enabled)
+
+
+# --- US-4.2: organization-level rule configuration ---------------------
+
+# `program_id: {rule_key: value}` — the shape the frontend's
+# `OrgConfigOverrides` type expects, and what `getEffectiveRules` uses
+# as its `orgOverrides` argument. Every program id appears as a key in
+# responses (even if empty) so the frontend doesn't have to guard on
+# `undefined` when walking tabs.
+OrgConfigMap = dict[str, dict[str, RuleValue]]
+
+
+class OrgConfigResponse(BaseModel):
+    """Full org-level override map. One GET, all programs."""
+
+    overrides: OrgConfigMap
+
+
+class UpdateProgramConfigRequest(BaseModel):
+    """Replace-all semantics for one program.
+
+    The frontend filters out values that equal the industry default
+    before sending — no point persisting a "customization" that matches
+    the default. If a rule is absent from `overrides`, the server
+    deletes any existing row for it.
+    """
+
+    overrides: dict[str, RuleValue]
+
+
+@router.get("/config/catalog")
+async def get_rule_catalog(
+    admin: Annotated[User, Depends(require_customer_admin)],
+) -> dict[str, object]:
+    """Industry-default catalog — served as JSON so the frontend doesn't
+    need to hand-maintain a parallel copy of the rule catalog.
+
+    Gated on `require_customer_admin` to match the page that consumes
+    it; the data itself isn't sensitive, but the page is admin-only and
+    there's no reason to expose this surface more broadly. Declared
+    above `/config/{program_id}` so "catalog" isn't swallowed as a
+    program id by the path-param route below.
+    """
+    # Local import keeps the module loaded only when the endpoint is hit.
+    from app.rules.catalog import LOAN_PROGRAMS
+
+    del admin  # dep is only here for auth; unused in the handler body.
+    return {
+        "programs": LOAN_PROGRAMS,
+        "rules": MICRO_APP_RULES,
+    }
+
+
+@router.get("/config", response_model=OrgConfigResponse)
+async def get_org_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_customer_admin)],
+) -> OrgConfigResponse:
+    stmt = select(AppRuleOverride).where(AppRuleOverride.org_id == admin.org_id)
+    rows = (await session.execute(stmt)).scalars().all()
+
+    # Seed with every known program id so callers can iterate without
+    # defensive `?? {}` guards in TS.
+    overrides: OrgConfigMap = {pid: {} for pid in LOAN_PROGRAM_IDS}
+    for row in rows:
+        overrides.setdefault(row.program_id, {})[row.rule_key] = row.value  # type: ignore[assignment]
+    return OrgConfigResponse(overrides=overrides)
+
+
+@router.put("/config/{program_id}", response_model=OrgConfigResponse)
+async def update_program_config(
+    program_id: str,
+    payload: UpdateProgramConfigRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_customer_admin)],
+) -> OrgConfigResponse:
+    """Replace all overrides for `program_id` with `payload.overrides`.
+
+    Three failure modes, all 400 before any DB write:
+      - Unknown program id.
+      - Unknown rule key in the payload.
+      - Value doesn't conform to the rule schema (type / min-max /
+        select options).
+
+    Validation is exhaustive — all errors in the payload would be the
+    right UX, but the first failure short-circuits to keep the error
+    surface simple; the frontend validates client-side first anyway.
+    """
+    if program_id not in LOAN_PROGRAM_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown program id: {program_id}",
+        )
+    for key, value in payload.overrides.items():
+        try:
+            validate_rule_value(key, value)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+    # Read current rows, diff against the desired state. Keeping the
+    # diff in-Python (rather than DELETE-then-INSERT) preserves the
+    # `updated_at` timestamp for rows whose value didn't change —
+    # useful for future audit queries.
+    stmt = select(AppRuleOverride).where(
+        AppRuleOverride.org_id == admin.org_id,
+        AppRuleOverride.program_id == program_id,
+    )
+    existing = {row.rule_key: row for row in (await session.execute(stmt)).scalars().all()}
+    desired = payload.overrides
+
+    # Delete rules absent from payload.
+    for key, row in existing.items():
+        if key not in desired:
+            await session.delete(row)
+
+    # Upsert rules present in payload.
+    for key, value in desired.items():
+        row = existing.get(key)
+        if row is None:
+            session.add(
+                AppRuleOverride(
+                    org_id=admin.org_id,
+                    program_id=program_id,
+                    rule_key=key,
+                    value=value,
+                )
+            )
+        elif row.value != value:
+            row.value = value
+
+    await session.commit()
+    return await get_org_config(session, admin)
+
+
+@router.delete("/config/{program_id}", response_model=OrgConfigResponse)
+async def reset_program_config(
+    program_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_customer_admin)],
+) -> OrgConfigResponse:
+    """Reset `program_id` to industry defaults (delete every override row)."""
+    if program_id not in LOAN_PROGRAM_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown program id: {program_id}",
+        )
+    stmt = select(AppRuleOverride).where(
+        AppRuleOverride.org_id == admin.org_id,
+        AppRuleOverride.program_id == program_id,
+    )
+    for row in (await session.execute(stmt)).scalars().all():
+        await session.delete(row)
+    await session.commit()
+    return await get_org_config(session, admin)

@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -155,5 +156,48 @@ class AppSubscription(Base):
         CheckConstraint(
             "app_id IN (" + ", ".join(f"'{a}'" for a in APP_IDS) + ")",
             name="app_subscriptions_app_id_check",
+        ),
+    )
+
+
+class AppRuleOverride(Base):
+    """One customer-admin org-level rule override (US-4.2).
+
+    Persists per (org_id, program_id, rule_key). Values are stored as
+    JSONB because the resolver treats str/int/float/bool uniformly —
+    splitting into typed columns would just push the discriminator
+    onto the API layer for no gain. Validation (type-matches-schema,
+    min/max, allowed-options) is enforced at the router layer against
+    `app.rules.catalog.MICRO_APP_RULES`.
+    """
+
+    __tablename__ = "app_rule_overrides"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    program_id: Mapped[str] = mapped_column(String, nullable=False)
+    rule_key: Mapped[str] = mapped_column(String, nullable=False)
+    value: Mapped[object] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id",
+            "program_id",
+            "rule_key",
+            name="app_rule_overrides_org_program_rule_unique",
         ),
     )
