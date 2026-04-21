@@ -1,20 +1,33 @@
-"""Platform-admin accounts-list tests (US-1.5).
+"""Platform-admin accounts endpoints tests (US-1.5 + US-1.6).
 
-Verifies the role guard (401 anon, 403 wrong role) and the shape of the
-payload for a platform admin — including that the seeded org shows up
-with the expected user_count from the `seeded` fixture (1 admin + 1 user
-= 2) and that subscription_count is the stubbed 0 until US-2.5 lands.
+US-1.5: list accounts — role guard + payload shape.
+US-1.6: create account — role guard, slug derivation, uniqueness/reserved
+slug rejection, primary-admin login.
 """
 
 from __future__ import annotations
 
+import uuid
+
 from httpx import AsyncClient
+from sqlalchemy import text
+
+from app.db import SessionLocal
 
 
 async def _login(client: AsyncClient, email: str, password: str) -> str:
     resp = await client.post("/api/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
+
+
+async def _delete_org(org_id: str) -> None:
+    """Tear-down helper for tests that create orgs via the API (the seeded
+    fixture only cleans up its own throwaway org)."""
+    async with SessionLocal() as session:
+        await session.execute(text("DELETE FROM users WHERE org_id = :o"), {"o": uuid.UUID(org_id)})
+        await session.execute(text("DELETE FROM orgs WHERE id = :o"), {"o": uuid.UUID(org_id)})
+        await session.commit()
 
 
 async def test_accounts_requires_auth(client: AsyncClient) -> None:
@@ -63,3 +76,135 @@ async def test_accounts_lists_orgs_for_platform_admin(client: AsyncClient, seede
     assert match["user_count"] == 2
     # US-2.5 will populate this; for now it's always 0.
     assert match["subscription_count"] == 0
+
+
+# --- US-1.6: POST /api/logikality/accounts -----------------------------
+
+
+def _create_payload(suffix: str) -> dict[str, str]:
+    """Fresh payload keyed by a caller-supplied suffix so each test's rows
+    are distinguishable and cleanup by org name/email is easy."""
+    return {
+        "name": f"Widget Lending {suffix}",
+        "type": "Mortgage Lender",
+        "primary_admin_full_name": "Wendy Widget",
+        "primary_admin_email": f"wendy-{suffix}@widget.example.com",
+    }
+
+
+async def test_create_account_requires_auth(client: AsyncClient) -> None:
+    resp = await client.post("/api/logikality/accounts", json=_create_payload("x"))
+    assert resp.status_code == 401
+
+
+async def test_create_account_rejects_customer_admin(client: AsyncClient, seeded) -> None:
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=_create_payload("cadm"),
+    )
+    assert resp.status_code == 403
+
+
+async def test_create_account_succeeds_and_new_admin_can_log_in(
+    client: AsyncClient, seeded
+) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    suffix = uuid.uuid4().hex[:8]
+    payload = _create_payload(suffix)
+
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    account = body["account"]
+    # Slug is derived server-side: lowercased, whitespace → hyphens.
+    assert account["slug"] == f"widget-lending-{suffix}"
+    assert account["name"] == payload["name"]
+    assert account["type"] == "Mortgage Lender"
+    assert account["user_count"] == 1
+    assert account["subscription_count"] == 0
+    assert body["primary_admin_email"] == payload["primary_admin_email"]
+    assert isinstance(body["temp_password"], str) and len(body["temp_password"]) >= 8
+
+    try:
+        # Round-trip: the new primary admin can log in with the temp password.
+        login = await client.post(
+            "/api/auth/login",
+            json={
+                "email": payload["primary_admin_email"],
+                "password": body["temp_password"],
+            },
+        )
+        assert login.status_code == 200, login.text
+        me = login.json()["user"]
+        assert me["role"] == "customer_admin"
+        assert me["is_primary_admin"] is True
+        assert me["org_slug"] == account["slug"]
+    finally:
+        await _delete_org(account["id"])
+
+
+async def test_create_account_rejects_duplicate_name(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    suffix = uuid.uuid4().hex[:8]
+    payload = _create_payload(suffix)
+
+    first = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+    assert first.status_code == 201
+    account_id = first.json()["account"]["id"]
+
+    try:
+        # Same name + slug, different admin email → still 409 on the org.
+        dup = await client.post(
+            "/api/logikality/accounts",
+            headers={"Authorization": f"Bearer {token}"},
+            json={**payload, "primary_admin_email": f"other-{suffix}@widget.example.com"},
+        )
+        assert dup.status_code == 409
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_create_account_rejects_reserved_slug(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": "Logikality",  # slugifies to the reserved `logikality`
+            "type": "Mortgage Lender",
+            "primary_admin_full_name": "Nope Nope",
+            "primary_admin_email": f"nope-{uuid.uuid4().hex[:8]}@example.com",
+        },
+    )
+    assert resp.status_code == 400
+
+
+async def test_create_account_rejects_invalid_type(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "name": f"BadType Co {uuid.uuid4().hex[:6]}",
+            "type": "Hedge Fund",
+            "primary_admin_full_name": "Bad Type",
+            "primary_admin_email": f"bt-{uuid.uuid4().hex[:8]}@example.com",
+        },
+    )
+    assert resp.status_code == 400
