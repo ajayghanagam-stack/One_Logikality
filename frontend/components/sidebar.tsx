@@ -30,12 +30,20 @@ type NavSection = { heading: string; items: Item[] };
  */
 function sectionsFor(role: Role, orgSlug: string | null): NavSection[] {
   if (role === "platform_admin") {
+    // Two sections mirror the demo: "Administration" for customer-facing
+    // work, "Account" for the admin's own profile. Keeps the mental model
+    // (what I manage vs. what's about me) visible at a glance.
     return [
       {
-        heading: "Platform admin",
+        heading: "Administration",
         items: [
-          { href: "/logikality/accounts", label: "Accounts", icon: "🏢" },
-          { href: "/logikality/profile", label: "Profile", icon: "🔑" },
+          { href: "/logikality/accounts", label: "Customer accounts", icon: "🏢" },
+        ],
+      },
+      {
+        heading: "Account",
+        items: [
+          { href: "/logikality/profile", label: "Change password", icon: "🔑" },
         ],
       },
     ];
@@ -82,8 +90,9 @@ export function Sidebar() {
   if (!user) return null;
 
   const sections = sectionsFor(user.role, user.org_slug);
-  const orgLabel = orgLabelFor(user.role);
+  const identity = identityFor(user.role, user.full_name, user.email);
   const isCustomerAdmin = user.role === "customer_admin";
+  const isPlatformAdmin = user.role === "platform_admin";
 
   return (
     <aside style={asideStyle}>
@@ -99,10 +108,15 @@ export function Sidebar() {
         />
       </div>
 
-      {/* Org block */}
+      {/* Identity block — "Signed in as" for platform admin, "Organization"
+          for customer roles. Label typography (10/0.5) is distinct from nav
+          section headings (9/0.8) to match the demo. */}
       <div style={orgBlockStyle}>
-        <div style={sectionLabelStyle}>{orgLabel.heading}</div>
-        <div style={orgNameStyle}>{orgLabel.value(user.full_name)}</div>
+        <div style={identityLabelStyle}>{identity.heading}</div>
+        <div style={orgNameStyle}>{identity.primary}</div>
+        {identity.secondary ? (
+          <div style={identitySecondaryStyle}>{identity.secondary}</div>
+        ) : null}
         {isCustomerAdmin ? <AdminBadge /> : null}
       </div>
 
@@ -134,14 +148,22 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer */}
+      {/* Footer — platform admin's identity is already in the top block, so
+          skip the repeating name/email there and use the demo's bordered
+          "← Sign out" button. Customer roles keep the name/email footer. */}
       <div style={footerStyle}>
-        <div style={userBlockStyle}>
-          <div style={userNameStyle}>{user.full_name}</div>
-          <div style={userEmailStyle}>{user.email}</div>
-        </div>
-        <button type="button" onClick={logout} style={signOutButtonStyle}>
-          Sign out
+        {isPlatformAdmin ? null : (
+          <div style={userBlockStyle}>
+            <div style={userNameStyle}>{user.full_name}</div>
+            <div style={userEmailStyle}>{user.email}</div>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={logout}
+          style={isPlatformAdmin ? platformSignOutButtonStyle : signOutButtonStyle}
+        >
+          {isPlatformAdmin ? "← Sign out" : "Sign out"}
         </button>
       </div>
     </aside>
@@ -169,19 +191,28 @@ function AdminBadge() {
   );
 }
 
-function orgLabelFor(role: Role): {
-  heading: string;
-  value: (name: string) => string;
-} {
+function identityFor(
+  role: Role,
+  fullName: string,
+  email: string,
+): { heading: string; primary: string; secondary: string | null } {
   if (role === "platform_admin") {
-    return { heading: "Workspace", value: () => "Logikality platform" };
+    // Demo parity: fixed "Platform administrator" as primary, real email
+    // underneath. Not a stealth display of user.full_name — every platform
+    // admin in this model reads the same role label.
+    return {
+      heading: "Signed in as",
+      primary: "Platform administrator",
+      secondary: email,
+    };
   }
   // Customer portal — the demo-seeded org is "Acme Mortgage Holdings".
   // Until we pipe the real org name through /auth/me, fall back to the
   // user's first name so the chrome is populated.
   return {
     heading: "Organization",
-    value: (name) => (name.includes(" ") ? "Acme Mortgage Holdings" : name),
+    primary: fullName.includes(" ") ? "Acme Mortgage Holdings" : fullName,
+    secondary: null,
   };
 }
 
@@ -214,6 +245,22 @@ const sectionLabelStyle: React.CSSProperties = {
   color: chrome.mutedFg,
   letterSpacing: 0.8,
   textTransform: "uppercase",
+};
+
+// Identity block uses a slightly larger label than nav section headings —
+// matches the demo's 10px/0.5 spacing which gives the top block more
+// visual weight than the subsequent nav groupings.
+const identityLabelStyle: React.CSSProperties = {
+  fontSize: 10,
+  color: chrome.mutedFg,
+  letterSpacing: 0.5,
+  textTransform: "uppercase",
+};
+
+const identitySecondaryStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: chrome.mutedFg,
+  marginTop: 1,
 };
 
 const orgNameStyle: React.CSSProperties = {
@@ -300,5 +347,20 @@ const signOutButtonStyle: React.CSSProperties = {
   letterSpacing: 0.4,
   textTransform: "uppercase",
   fontWeight: 500,
+  fontFamily: typography.fontFamily.primary,
+};
+
+// Platform-admin variant — larger, mixed-case "← Sign out" with a leading
+// arrow glyph, matching the demo's PlatformAdminSidebar exactly.
+const platformSignOutButtonStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "7px 12px",
+  fontSize: 12,
+  fontWeight: 500,
+  background: "transparent",
+  color: chrome.mutedFg,
+  border: `1px solid ${chrome.border}`,
+  borderRadius: 6,
+  cursor: "pointer",
   fontFamily: typography.fontFamily.primary,
 };
