@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -22,6 +23,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -223,6 +225,14 @@ PACKET_STATUSES: tuple[str, ...] = (
     "failed",
 )
 
+# Loan-program confirmation states (US-3.11). In lockstep with migration
+# 0009's CHECK constraint.
+CONFIRMATION_STATUSES: tuple[str, ...] = (
+    "confirmed",
+    "conflict",
+    "inconclusive",
+)
+
 
 class Packet(Base):
     """A document packet submitted by a customer user for ECV processing.
@@ -270,6 +280,31 @@ class Packet(Base):
         nullable=False,
     )
 
+    # Loan-program confirmation (US-3.11). Written by the ECV pipeline
+    # during the `score` stage; NULL until findings exist.
+    program_confirmation_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    program_confirmation_suggested_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    program_confirmation_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # List of document names the pipeline inspected to reach the
+    # confirmation verdict (shown on the pill / override dialog preview).
+    program_confirmation_documents: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+
+    # Packet-level program override (US-3.12). Set by POST
+    # /api/packets/{id}/program-override; a revert clears all four at
+    # once. `program_overridden_to` is the effective program for rule
+    # resolution when non-NULL.
+    program_overridden_to: Mapped[str | None] = mapped_column(String, nullable=True)
+    program_override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    program_overridden_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    program_overridden_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     files: Mapped[list[PacketFile]] = relationship(
         back_populates="packet",
         cascade="all, delete-orphan",
@@ -279,6 +314,12 @@ class Packet(Base):
         CheckConstraint(
             "status IN (" + ", ".join(f"'{s}'" for s in PACKET_STATUSES) + ")",
             name="packets_status_check",
+        ),
+        CheckConstraint(
+            "program_confirmation_status IS NULL OR program_confirmation_status IN ("
+            + ", ".join(f"'{s}'" for s in CONFIRMATION_STATUSES)
+            + ")",
+            name="packets_program_confirmation_status_check",
         ),
     )
 

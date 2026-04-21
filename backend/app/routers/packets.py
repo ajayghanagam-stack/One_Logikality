@@ -16,7 +16,7 @@ replaces the stub in a later slice.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import (
@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.storage_local import get_storage
 from app.db import get_session
-from app.deps import require_customer_role
+from app.deps import require_customer_admin, require_customer_role
 from app.models import EcvDocument, EcvLineItem, EcvSection, Packet, PacketFile, User
 from app.pipeline.ecv_stub import run_ecv_stub
 from app.rules import LOAN_PROGRAM_IDS
@@ -60,6 +60,25 @@ class PacketFileOut(BaseModel):
     content_type: str
 
 
+class ProgramConfirmationOut(BaseModel):
+    """ECV document analysis for the declared program (US-3.11)."""
+
+    status: str
+    suggested_program_id: str | None
+    evidence: str
+    documents_analyzed: list[str]
+
+
+class ProgramOverrideOut(BaseModel):
+    """Packet-level program override audit record (US-3.12)."""
+
+    program_id: str
+    reason: str
+    overridden_by: str
+    overridden_by_name: str | None
+    overridden_at: datetime
+
+
 class PacketOut(BaseModel):
     id: str
     declared_program_id: str
@@ -72,6 +91,11 @@ class PacketOut(BaseModel):
     completed_at: datetime | None
     created_at: datetime
     files: list[PacketFileOut]
+    # Loan-program confirmation + override (US-3.11 / US-3.12). Both
+    # NULL until the pipeline has produced a verdict; override is NULL
+    # until a customer admin changes the program away from declared.
+    program_confirmation: ProgramConfirmationOut | None
+    program_override: ProgramOverrideOut | None
 
 
 def _extension(filename: str) -> str:
@@ -167,24 +191,7 @@ async def create_packet(
     # immediately and watch `current_stage` tick through PIPELINE_STAGES.
     background.add_task(run_ecv_stub, packet.id)
 
-    return PacketOut(
-        id=str(packet.id),
-        declared_program_id=packet.declared_program_id,
-        status=packet.status,
-        current_stage=packet.current_stage,
-        started_processing_at=packet.started_processing_at,
-        completed_at=packet.completed_at,
-        created_at=packet.created_at,
-        files=[
-            PacketFileOut(
-                id=str(f.id),
-                filename=f.filename,
-                size_bytes=f.size_bytes,
-                content_type=f.content_type,
-            )
-            for f in file_rows
-        ],
-    )
+    return _packet_out(packet, file_rows)
 
 
 class EcvLineItemOut(BaseModel):
@@ -252,6 +259,172 @@ _CONFIDENCE_THRESHOLD = 85
 _CRITICAL_THRESHOLD = 50
 _AUTO_APPROVE_THRESHOLD = 90
 
+# Override reason must be long enough to be a real audit-trail note, not
+# "ok". Matches the demo's 5-char floor so users aren't surprised by a
+# stricter rule after the port.
+_MIN_OVERRIDE_REASON_LENGTH = 5
+
+
+def _packet_out(
+    packet: Packet,
+    files: list[PacketFile],
+    overrider_name: str | None = None,
+) -> PacketOut:
+    """Serialize a Packet (+ files) into the wire shape.
+
+    Folds in the confirmation and override sub-objects so every packet
+    response shares one source of truth. `overrider_name` is looked up
+    separately by the caller (it's on `users`, not on `packets`) and
+    passed in for inclusion on the override block; NULL when the packet
+    has no override or when the overriding user has since been deleted.
+    """
+    confirmation: ProgramConfirmationOut | None = None
+    if packet.program_confirmation_status is not None:
+        confirmation = ProgramConfirmationOut(
+            status=packet.program_confirmation_status,
+            suggested_program_id=packet.program_confirmation_suggested_id,
+            evidence=packet.program_confirmation_evidence or "",
+            documents_analyzed=list(packet.program_confirmation_documents or []),
+        )
+
+    override: ProgramOverrideOut | None = None
+    if (
+        packet.program_overridden_to is not None
+        and packet.program_override_reason is not None
+        and packet.program_overridden_by is not None
+        and packet.program_overridden_at is not None
+    ):
+        override = ProgramOverrideOut(
+            program_id=packet.program_overridden_to,
+            reason=packet.program_override_reason,
+            overridden_by=str(packet.program_overridden_by),
+            overridden_by_name=overrider_name,
+            overridden_at=packet.program_overridden_at,
+        )
+
+    return PacketOut(
+        id=str(packet.id),
+        declared_program_id=packet.declared_program_id,
+        status=packet.status,
+        current_stage=packet.current_stage,
+        started_processing_at=packet.started_processing_at,
+        completed_at=packet.completed_at,
+        created_at=packet.created_at,
+        files=[
+            PacketFileOut(
+                id=str(f.id),
+                filename=f.filename,
+                size_bytes=f.size_bytes,
+                content_type=f.content_type,
+            )
+            for f in files
+        ],
+        program_confirmation=confirmation,
+        program_override=override,
+    )
+
+
+async def _fetch_overrider_name(session: AsyncSession, packet: Packet) -> str | None:
+    """Look up the overrider's full_name when the packet has an override.
+
+    Returns None if the user row has been deleted (FK is SET NULL, so
+    `program_overridden_by` can also be NULL while the timestamp is not
+    — in that case the client shows "by unknown user").
+    """
+    if packet.program_overridden_by is None:
+        return None
+    return (
+        await session.execute(select(User.full_name).where(User.id == packet.program_overridden_by))
+    ).scalar_one_or_none()
+
+
+class ProgramOverrideIn(BaseModel):
+    """Body for `POST /api/packets/{id}/program-override`."""
+
+    program_id: str
+    reason: str
+
+
+@router.post("/{packet_id}/program-override", response_model=PacketOut)
+async def set_packet_program_override(
+    packet_id: uuid.UUID,
+    body: ProgramOverrideIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_admin)],
+) -> PacketOut:
+    """Override the declared loan program for this packet (US-3.12).
+
+    Restricted to customer admins — changing the program swaps the
+    entire rule baseline and is a customer-admin-level decision. A
+    replay of the same program is treated as a no-op; changing to the
+    declared program with a reason is allowed (records intent). The
+    reason is required (>= 5 chars) and stored in the audit trail.
+    """
+    if body.program_id not in LOAN_PROGRAM_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown program id {body.program_id!r}",
+        )
+    reason = body.reason.strip()
+    if len(reason) < _MIN_OVERRIDE_REASON_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"reason must be at least {_MIN_OVERRIDE_REASON_LENGTH} characters",
+        )
+
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    packet.program_overridden_to = body.program_id
+    packet.program_override_reason = reason
+    packet.program_overridden_by = user.id
+    packet.program_overridden_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(packet)
+
+    files = (
+        (await session.execute(select(PacketFile).where(PacketFile.packet_id == packet_id)))
+        .scalars()
+        .all()
+    )
+    overrider_name = user.full_name  # we know who it is — the current user
+    return _packet_out(packet, list(files), overrider_name=overrider_name)
+
+
+@router.delete("/{packet_id}/program-override", response_model=PacketOut)
+async def clear_packet_program_override(
+    packet_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_admin)],
+) -> PacketOut:
+    """Revert a packet-level program override back to the declared program.
+
+    Idempotent — reverting a packet that has no override returns the
+    current packet unchanged.
+    """
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    packet.program_overridden_to = None
+    packet.program_override_reason = None
+    packet.program_overridden_by = None
+    packet.program_overridden_at = None
+    await session.commit()
+    await session.refresh(packet)
+
+    files = (
+        (await session.execute(select(PacketFile).where(PacketFile.packet_id == packet_id)))
+        .scalars()
+        .all()
+    )
+    return _packet_out(packet, list(files), overrider_name=None)
+
 
 @router.get("/{packet_id}", response_model=PacketOut)
 async def get_packet(
@@ -273,24 +446,8 @@ async def get_packet(
         .scalars()
         .all()
     )
-    return PacketOut(
-        id=str(packet.id),
-        declared_program_id=packet.declared_program_id,
-        status=packet.status,
-        current_stage=packet.current_stage,
-        started_processing_at=packet.started_processing_at,
-        completed_at=packet.completed_at,
-        created_at=packet.created_at,
-        files=[
-            PacketFileOut(
-                id=str(f.id),
-                filename=f.filename,
-                size_bytes=f.size_bytes,
-                content_type=f.content_type,
-            )
-            for f in files
-        ],
-    )
+    overrider_name = await _fetch_overrider_name(session, packet)
+    return _packet_out(packet, list(files), overrider_name=overrider_name)
 
 
 @router.get("/{packet_id}/ecv", response_model=EcvDashboardOut)
@@ -318,24 +475,8 @@ async def get_packet_ecv(
         .scalars()
         .all()
     )
-    packet_out = PacketOut(
-        id=str(packet.id),
-        declared_program_id=packet.declared_program_id,
-        status=packet.status,
-        current_stage=packet.current_stage,
-        started_processing_at=packet.started_processing_at,
-        completed_at=packet.completed_at,
-        created_at=packet.created_at,
-        files=[
-            PacketFileOut(
-                id=str(f.id),
-                filename=f.filename,
-                size_bytes=f.size_bytes,
-                content_type=f.content_type,
-            )
-            for f in files
-        ],
-    )
+    overrider_name = await _fetch_overrider_name(session, packet)
+    packet_out = _packet_out(packet, list(files), overrider_name=overrider_name)
 
     # Findings aren't persisted until the stub reaches the `score`
     # stage. Before that, tell the client so it can show a "still

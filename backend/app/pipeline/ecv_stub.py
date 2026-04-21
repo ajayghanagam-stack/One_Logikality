@@ -29,7 +29,12 @@ from sqlalchemy import select, update
 
 from app.db import SessionLocal
 from app.models import EcvDocument, EcvLineItem, EcvSection, Packet
-from app.pipeline.ecv_data import DOCUMENT_INVENTORY, ECV_LINE_ITEMS, ECV_SECTIONS
+from app.pipeline.ecv_data import (
+    CONFIRMATION_BY_PROGRAM,
+    DOCUMENT_INVENTORY,
+    ECV_LINE_ITEMS,
+    ECV_SECTIONS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -122,12 +127,15 @@ async def _persist_findings(packet_id: uuid.UUID) -> None:
         if existing is not None:
             return
 
-        org_id = (
-            await session.execute(select(Packet.org_id).where(Packet.id == packet_id))
-        ).scalar_one_or_none()
-        if org_id is None:
+        packet_row = (
+            await session.execute(
+                select(Packet.org_id, Packet.declared_program_id).where(Packet.id == packet_id)
+            )
+        ).one_or_none()
+        if packet_row is None:
             log.warning("stub: packet %s vanished before findings write", packet_id)
             return
+        org_id, declared_program_id = packet_row
 
         section_rows = [
             EcvSection(
@@ -184,5 +192,22 @@ async def _persist_findings(packet_id: uuid.UUID) -> None:
                 )
             )
         session.add_all(doc_rows)
+
+        # Loan-program confirmation (US-3.11). Look up the canned verdict
+        # for the declared program and stamp it onto the packet row.
+        # Unknown program ids (shouldn't happen — the POST validates
+        # against LOAN_PROGRAM_IDS) fall through to NULLs.
+        confirmation = CONFIRMATION_BY_PROGRAM.get(declared_program_id)
+        if confirmation is not None:
+            await session.execute(
+                update(Packet)
+                .where(Packet.id == packet_id)
+                .values(
+                    program_confirmation_status=confirmation["status"],
+                    program_confirmation_suggested_id=confirmation.get("suggested_program_id"),
+                    program_confirmation_evidence=confirmation["evidence"],
+                    program_confirmation_documents=list(confirmation["documents_analyzed"]),
+                )
+            )
 
         await session.commit()

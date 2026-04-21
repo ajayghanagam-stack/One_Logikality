@@ -702,3 +702,86 @@ DOCUMENT_INVENTORY: tuple[_Document, ...] = (
         "page_issue": None,
     },
 )
+
+
+# Loan-program confirmation analysis (US-3.11). Ported 1:1 from the
+# demo's CONFIRMATION_ANALYSIS constant. The stub uses these verdicts
+# when persisting findings: the packet's declared program id picks the
+# entry, and the fields flow onto the `packets` row so the dashboard
+# pill can render Confirmed / Conflict / Inconclusive without another
+# round trip.
+class _Confirmation(TypedDict, total=False):
+    status: Literal["confirmed", "conflict", "inconclusive"]
+    documents_analyzed: list[str]
+    evidence: str
+    suggested_program_id: str | None
+
+
+CONFIRMATION_BY_PROGRAM: dict[str, _Confirmation] = {
+    "conventional": {
+        "status": "confirmed",
+        "documents_analyzed": ["Note", "Closing Disclosure", "URLA 1003"],
+        "evidence": (
+            "Loan amount $385,000 is under the FHFA 2026 conforming limit of "
+            "$766,550. Note references Fannie Mae servicing. No FHA case "
+            "number, VA certificate, or USDA conditional commitment found in "
+            "packet. Documents are consistent with the declared Conventional "
+            "Conforming program."
+        ),
+        "suggested_program_id": None,
+    },
+    "jumbo": {
+        "status": "conflict",
+        "documents_analyzed": ["Note", "Closing Disclosure"],
+        "evidence": (
+            "Loan amount $385,000 is below the 2026 conforming limit of "
+            "$766,550 for this county. Jumbo designation requires loan "
+            "amount above conforming limits. Documents suggest Conventional "
+            "Conforming instead."
+        ),
+        "suggested_program_id": "conventional",
+    },
+    "fha": {
+        "status": "conflict",
+        "documents_analyzed": ["Note", "URLA 1003", "Disclosure bundle"],
+        "evidence": (
+            "No FHA case number found in packet. URLA 1003 does not indicate "
+            "FHA insurance. No FHA-specific disclosures (Amendatory Clause, "
+            "Informed Consumer Choice) present. Documents suggest this is a "
+            "Conventional Conforming loan."
+        ),
+        "suggested_program_id": "conventional",
+    },
+    "va": {
+        "status": "conflict",
+        "documents_analyzed": ["Note", "URLA 1003"],
+        "evidence": (
+            "No VA Certificate of Eligibility found in packet. No VA Funding "
+            "Fee disclosure. URLA does not reference VA guaranty. Documents "
+            "suggest Conventional Conforming."
+        ),
+        "suggested_program_id": "conventional",
+    },
+    "usda": {
+        "status": "conflict",
+        "documents_analyzed": ["Note", "Property Appraisal"],
+        "evidence": (
+            "No USDA conditional commitment in packet. Property address "
+            "(Springfield, IL) is not in a USDA-eligible rural area per 2026 "
+            "USDA eligibility maps. Documents suggest Conventional Conforming."
+        ),
+        "suggested_program_id": "conventional",
+    },
+    "nonqm": {
+        "status": "inconclusive",
+        "documents_analyzed": ["Note", "URLA 1003", "Income documentation"],
+        "evidence": (
+            "Standard W-2 income documentation present. No bank statement "
+            "program indicators or DSCR calculations found. Packet appears "
+            "to be full-doc. However, Non-QM designation depends on investor "
+            "classification not deterministic from packet alone. Proceeding "
+            "with declared program."
+        ),
+        "suggested_program_id": None,
+    },
+}
