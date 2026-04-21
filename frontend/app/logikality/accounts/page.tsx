@@ -68,8 +68,7 @@ export default function AccountsPage() {
         <div>
           <h1 style={titleStyle}>Customer accounts</h1>
           <p style={subtitleStyle}>
-            Organizations provisioned on One Logikality. Create, edit, or remove
-            accounts and manage each tenant&rsquo;s app subscriptions.
+            Manage customer organizations, subscriptions, and designated administrators.
           </p>
         </div>
         {/* New-account CTA — US-1.6 lands the form. The link is wired now
@@ -217,15 +216,16 @@ const headerStyle: React.CSSProperties = {
 };
 
 const titleStyle: React.CSSProperties = {
-  margin: 0,
+  margin: "0 0 4px",
   fontSize: 24,
   fontWeight: typography.fontWeight.headline,
   color: chrome.charcoal,
+  letterSpacing: "-0.02em",
 };
 
 const subtitleStyle: React.CSSProperties = {
-  margin: "6px 0 0",
-  fontSize: 14,
+  margin: 0,
+  fontSize: 13,
   color: chrome.mutedFg,
   lineHeight: 1.5,
   maxWidth: 640,

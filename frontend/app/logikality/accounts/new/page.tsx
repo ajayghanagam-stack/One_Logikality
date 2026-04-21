@@ -10,6 +10,16 @@
  * plaintext is never retrievable again, so the success state
  * intentionally blocks easy dismissal (no auto-redirect).
  *
+ * Visual layout mirrors `one-logikality-demo`'s
+ * /platform-admin/accounts/new: breadcrumb, amber icon-tile header,
+ * section-card panels, two-column grids. Two deliberate divergences:
+ *   - No password field — the demo lets the admin type a password,
+ *     but our backend auto-generates a one-time temp password. The
+ *     admin-section explainer flags this.
+ *   - No subscribed-apps panel — subscription persistence lands in
+ *     US-2.5; showing the panel here would fake a save that doesn't
+ *     happen. A one-line note under the sections points at US-2.5.
+ *
  * Role enforcement: `useRequireRole` is a UX guard; the backend
  * gates the endpoint with `require_platform_admin`.
  */
@@ -22,16 +32,18 @@ import { api, ApiError } from "@/lib/api";
 import { useAuth, useRequireRole } from "@/lib/auth";
 import { chrome, typography } from "@/lib/brand";
 
-// Mirrors `ORG_TYPES` in backend/app/models.py. Kept in lockstep by hand;
-// if this list grows, surface it from the backend via a config endpoint.
+// Kept in lockstep with `ORG_TYPES` in backend/app/models.py — the `label`
+// is what the API validates against. `desc` mirrors the demo's per-type
+// caption shown under the select. If this list grows, surface it from the
+// backend via a config endpoint rather than letting it drift further.
 const ORG_TYPES = [
-  "Mortgage Lender",
-  "Loan Servicer",
-  "Title Agency",
-  "Mortgage BPO",
+  { label: "Mortgage Lender", desc: "Origination, underwriting, closing" },
+  { label: "Loan Servicer", desc: "Post-close, servicing, QC" },
+  { label: "Title Agency", desc: "Title search, examination, closing" },
+  { label: "Mortgage BPO", desc: "Outsourced operations and vendor services" },
 ] as const;
 
-type OrgType = (typeof ORG_TYPES)[number];
+type OrgTypeLabel = (typeof ORG_TYPES)[number]["label"];
 
 type CreateResponse = {
   account: {
@@ -53,7 +65,7 @@ export default function NewAccountPage() {
   const router = useRouter();
 
   const [name, setName] = useState("");
-  const [type, setType] = useState<OrgType>(ORG_TYPES[0]);
+  const [type, setType] = useState<OrgTypeLabel>(ORG_TYPES[0].label);
   const [adminName, setAdminName] = useState("");
   const [adminEmail, setAdminEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -63,9 +75,12 @@ export default function NewAccountPage() {
 
   if (!ready) return null;
 
+  const canSubmit =
+    name.trim().length > 0 && adminName.trim().length > 0 && adminEmail.trim().length > 0;
+
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!token) return;
+    if (!token || !canSubmit) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -103,89 +118,137 @@ export default function NewAccountPage() {
     }
   }
 
+  const selectedType = ORG_TYPES.find((t) => t.label === type);
+
   return (
     <div style={pageStyle}>
-      <nav style={breadcrumbStyle}>
+      <nav style={breadcrumbStyle} aria-label="Breadcrumb">
         <Link href="/logikality/accounts" style={breadcrumbLinkStyle}>
-          ← Back to accounts
+          Customer accounts
         </Link>
+        <span style={breadcrumbSepStyle}>›</span>
+        <span style={breadcrumbCurrentStyle}>Onboard new customer</span>
       </nav>
 
-      <header>
-        <h1 style={titleStyle}>Create customer account</h1>
-        <p style={subtitleStyle}>
-          Provision a new customer organization and its primary admin. The
-          admin receives a one-time temporary password to share with the
-          customer — copy it from the confirmation screen before navigating
-          away.
-        </p>
+      <header style={headerStyle}>
+        <div style={headerIconStyle} aria-hidden="true">
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+            <circle cx="8.5" cy="7" r="4" />
+            <line x1="20" y1="8" x2="20" y2="14" />
+            <line x1="23" y1="11" x2="17" y2="11" />
+          </svg>
+        </div>
+        <div>
+          <h1 style={titleStyle}>Onboard new customer</h1>
+          <p style={subtitleStyle}>
+            Create the organization and set the designated customer administrator.
+          </p>
+        </div>
       </header>
 
       {created ? (
-        <SuccessPanel
+        <SuccessCard
           created={created}
           copied={copied}
           onCopy={copyPassword}
           onDone={() => router.push("/logikality/accounts")}
         />
       ) : (
-        <form onSubmit={onSubmit} style={formStyle} noValidate>
-          <Field label="Organization name" htmlFor="org-name" required>
-            <input
-              id="org-name"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              maxLength={120}
-              autoComplete="off"
-              style={inputStyle}
-              placeholder="Acme Mortgage Holdings"
-            />
-          </Field>
+        <form onSubmit={onSubmit} style={formColumnStyle} noValidate>
+          {/* ——— Organization details ——— */}
+          <section style={sectionStyle}>
+            <h2 style={sectionTitleStyle}>Organization details</h2>
+            <div style={twoColGridStyle}>
+              <Field label="Company name" htmlFor="org-name">
+                <input
+                  id="org-name"
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                  maxLength={120}
+                  autoComplete="off"
+                  style={inputStyle}
+                  placeholder="Acme Mortgage Holdings"
+                />
+              </Field>
+              <Field label="Organization type" htmlFor="org-type">
+                <select
+                  id="org-type"
+                  value={type}
+                  onChange={(e) => setType(e.target.value as OrgTypeLabel)}
+                  required
+                  style={{ ...inputStyle, cursor: "pointer" }}
+                >
+                  {ORG_TYPES.map((t) => (
+                    <option key={t.label} value={t.label}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                {selectedType ? (
+                  <div style={fieldHintStyle}>{selectedType.desc}.</div>
+                ) : null}
+              </Field>
+            </div>
+          </section>
 
-          <Field label="Organization type" htmlFor="org-type" required>
-            <select
-              id="org-type"
-              value={type}
-              onChange={(e) => setType(e.target.value as OrgType)}
-              required
-              style={inputStyle}
-            >
-              {ORG_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {/* ——— Designated customer administrator ——— */}
+          <section style={sectionStyle}>
+            <h2 style={sectionTitleStyle}>Designated customer administrator</h2>
+            <p style={sectionIntroStyle}>
+              The customer administrator can invite additional users, enable or disable
+              subscribed micro-apps, and configure organization-level rule overrides.
+            </p>
+            <div style={twoColGridStyle}>
+              <Field label="Admin full name" htmlFor="admin-name">
+                <input
+                  id="admin-name"
+                  type="text"
+                  value={adminName}
+                  onChange={(e) => setAdminName(e.target.value)}
+                  required
+                  maxLength={120}
+                  autoComplete="off"
+                  style={inputStyle}
+                  placeholder="Jane Smith"
+                />
+              </Field>
+              <Field label="Admin email" htmlFor="admin-email">
+                <input
+                  id="admin-email"
+                  type="email"
+                  value={adminEmail}
+                  onChange={(e) => setAdminEmail(e.target.value)}
+                  required
+                  autoComplete="off"
+                  style={inputStyle}
+                  placeholder="admin@acmemortgage.com"
+                />
+              </Field>
+            </div>
+            <div style={noticeStyle}>
+              A one-time temporary password is generated on save and shown once on
+              the confirmation screen. Share it securely with the admin — they can
+              change it after signing in.
+            </div>
+          </section>
 
-          <Field label="Primary admin name" htmlFor="admin-name" required>
-            <input
-              id="admin-name"
-              type="text"
-              value={adminName}
-              onChange={(e) => setAdminName(e.target.value)}
-              required
-              maxLength={120}
-              autoComplete="off"
-              style={inputStyle}
-              placeholder="Jane Underwriter"
-            />
-          </Field>
-
-          <Field label="Primary admin email" htmlFor="admin-email" required>
-            <input
-              id="admin-email"
-              type="email"
-              value={adminEmail}
-              onChange={(e) => setAdminEmail(e.target.value)}
-              required
-              autoComplete="off"
-              style={inputStyle}
-              placeholder="jane@acmemortgage.com"
-            />
-          </Field>
+          {/* Subscription management lands in US-2.5; flagging here so the
+              scope of this page is obvious to whoever opens it next. */}
+          <p style={phaseNoteStyle}>
+            App subscriptions are configured after the account is created (US-2.5).
+          </p>
 
           {error ? (
             <div role="alert" style={errorStyle}>
@@ -195,24 +258,24 @@ export default function NewAccountPage() {
 
           <div style={actionsStyle}>
             <Link href="/logikality/accounts" style={secondaryBtnStyle}>
-              Cancel
+              Back to accounts
             </Link>
             <button
               type="submit"
-              disabled={submitting}
-              className="ol-new-account-btn"
+              disabled={submitting || !canSubmit}
+              className="ol-create-btn"
               style={{
                 ...primaryBtnStyle,
-                opacity: submitting ? 0.7 : 1,
-                cursor: submitting ? "wait" : "pointer",
+                opacity: submitting || !canSubmit ? 0.5 : 1,
+                cursor: submitting || !canSubmit ? "not-allowed" : "pointer",
               }}
             >
-              {submitting ? "Creating…" : "Create account"}
+              {submitting ? "Creating…" : "Create customer account"}
             </button>
           </div>
           <style>{`
-            .ol-new-account-btn { transition: background 0.15s; }
-            .ol-new-account-btn:hover:not(:disabled) { background: ${chrome.amberDark}; }
+            .ol-create-btn { transition: background 0.15s; }
+            .ol-create-btn:hover:not(:disabled) { background: ${chrome.amberDark}; }
           `}</style>
         </form>
       )}
@@ -223,26 +286,23 @@ export default function NewAccountPage() {
 function Field({
   label,
   htmlFor,
-  required,
   children,
 }: {
   label: string;
   htmlFor: string;
-  required?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div style={fieldStyle}>
       <label htmlFor={htmlFor} style={labelStyle}>
         {label}
-        {required ? <span style={{ color: chrome.amber }}> *</span> : null}
       </label>
       {children}
     </div>
   );
 }
 
-function SuccessPanel({
+function SuccessCard({
   created,
   copied,
   onCopy,
@@ -254,9 +314,25 @@ function SuccessPanel({
   onDone: () => void;
 }) {
   return (
-    <div style={successCardStyle}>
-      <div style={successBadgeStyle}>Account created</div>
-      <h2 style={successTitleStyle}>{created.account.name}</h2>
+    <div style={sectionStyle}>
+      <div style={successBannerStyle}>
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+        <span>
+          Account created for <strong>{created.account.name}</strong>.
+        </span>
+      </div>
       <dl style={dlStyle}>
         <dt style={dtStyle}>Customer portal</dt>
         <dd style={ddStyle}>
@@ -272,9 +348,9 @@ function SuccessPanel({
           </button>
         </dd>
       </dl>
-      <p style={successNoteStyle}>
-        This password is shown once and cannot be retrieved later. Share it
-        securely — the admin should change it after first login.
+      <p style={sectionIntroStyle}>
+        This password is shown once and cannot be retrieved later. Share it securely
+        — the admin should change it after first login.
       </p>
       <div style={actionsStyle}>
         <button type="button" onClick={onDone} style={primaryBtnStyle}>
@@ -291,16 +367,48 @@ const pageStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   gap: 20,
-  maxWidth: 640,
+  maxWidth: 760,
 };
 
 const breadcrumbStyle: React.CSSProperties = {
-  fontSize: 13,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  fontSize: 12,
+  color: chrome.mutedFg,
 };
 
 const breadcrumbLinkStyle: React.CSSProperties = {
-  color: chrome.mutedFg,
+  color: chrome.amber,
   textDecoration: "none",
+};
+
+const breadcrumbSepStyle: React.CSSProperties = {
+  color: chrome.mutedFg,
+};
+
+const breadcrumbCurrentStyle: React.CSSProperties = {
+  color: chrome.charcoal,
+  fontWeight: typography.fontWeight.subheading,
+};
+
+const headerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+};
+
+const headerIconStyle: React.CSSProperties = {
+  width: 40,
+  height: 40,
+  borderRadius: 12,
+  background: chrome.amberBg,
+  border: `1px solid ${chrome.amberLight}`,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: chrome.amberDark,
+  flexShrink: 0,
 };
 
 const titleStyle: React.CSSProperties = {
@@ -308,23 +416,51 @@ const titleStyle: React.CSSProperties = {
   fontSize: 24,
   fontWeight: typography.fontWeight.headline,
   color: chrome.charcoal,
+  letterSpacing: "-0.02em",
 };
 
 const subtitleStyle: React.CSSProperties = {
-  margin: "6px 0 0",
-  fontSize: 14,
+  margin: "2px 0 0",
+  fontSize: 13,
   color: chrome.mutedFg,
   lineHeight: 1.5,
 };
 
-const formStyle: React.CSSProperties = {
-  backgroundColor: chrome.card,
-  border: `1px solid ${chrome.border}`,
-  borderRadius: 10,
-  padding: 24,
+const formColumnStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 16,
+  gap: 18,
+};
+
+const sectionStyle: React.CSSProperties = {
+  backgroundColor: chrome.card,
+  border: `1px solid ${chrome.border}`,
+  borderRadius: 12,
+  padding: "18px 22px",
+  boxShadow: "0 1px 3px rgba(20,18,14,0.04)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 14,
+};
+
+const sectionTitleStyle: React.CSSProperties = {
+  fontSize: 14,
+  fontWeight: typography.fontWeight.subheading,
+  margin: 0,
+  color: chrome.charcoal,
+};
+
+const sectionIntroStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: chrome.mutedFg,
+  margin: 0,
+  lineHeight: 1.5,
+};
+
+const twoColGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 14,
 };
 
 const fieldStyle: React.CSSProperties = {
@@ -335,34 +471,58 @@ const fieldStyle: React.CSSProperties = {
 
 const labelStyle: React.CSSProperties = {
   fontSize: 12,
-  fontWeight: typography.fontWeight.subheading,
-  textTransform: "uppercase",
-  letterSpacing: "0.06em",
+  fontWeight: 500,
+  color: chrome.charcoal,
+};
+
+const fieldHintStyle: React.CSSProperties = {
+  fontSize: 11,
   color: chrome.mutedFg,
+  lineHeight: 1.5,
+  marginTop: 2,
 };
 
 const inputStyle: React.CSSProperties = {
+  width: "100%",
   padding: "10px 12px",
   fontSize: 14,
-  color: chrome.fg,
-  backgroundColor: "#FFFFFF",
+  color: chrome.charcoal,
+  backgroundColor: chrome.card,
   border: `1px solid ${chrome.border}`,
   borderRadius: 8,
   outline: "none",
   fontFamily: "inherit",
+  boxSizing: "border-box",
+};
+
+const noticeStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: chrome.mutedFg,
+  lineHeight: 1.5,
+  marginTop: 2,
+  padding: "10px 12px",
+  backgroundColor: chrome.amberBg,
+  border: `1px solid ${chrome.amberLight}`,
+  borderRadius: 8,
+};
+
+const phaseNoteStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 12,
+  color: chrome.mutedFg,
+  fontStyle: "italic",
 };
 
 const actionsStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "flex-end",
   gap: 10,
-  marginTop: 4,
 };
 
 const primaryBtnStyle: React.CSSProperties = {
   backgroundColor: chrome.amber,
   color: "#FFFFFF",
-  padding: "10px 18px",
+  padding: "10px 20px",
   borderRadius: 8,
   fontSize: 14,
   fontWeight: typography.fontWeight.subheading,
@@ -386,41 +546,25 @@ const secondaryBtnStyle: React.CSSProperties = {
 };
 
 const errorStyle: React.CSSProperties = {
-  backgroundColor: "#FDECEC",
-  color: "#8A1C1C",
+  backgroundColor: "#FEE2E2",
+  color: "#991B1B",
+  border: "1px solid #FCA5A5",
   borderRadius: 8,
   padding: "10px 14px",
-  fontSize: 14,
+  fontSize: 13,
   lineHeight: 1.4,
 };
 
-const successCardStyle: React.CSSProperties = {
-  backgroundColor: chrome.card,
-  border: `1px solid ${chrome.border}`,
-  borderRadius: 10,
-  padding: 24,
+const successBannerStyle: React.CSSProperties = {
   display: "flex",
-  flexDirection: "column",
-  gap: 14,
-};
-
-const successBadgeStyle: React.CSSProperties = {
-  alignSelf: "flex-start",
-  backgroundColor: chrome.amberBg,
-  color: chrome.amberDark,
-  padding: "4px 10px",
-  borderRadius: 999,
-  fontSize: 11,
-  fontWeight: typography.fontWeight.subheading,
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
-};
-
-const successTitleStyle: React.CSSProperties = {
-  margin: 0,
-  fontSize: 20,
-  fontWeight: typography.fontWeight.headline,
-  color: chrome.charcoal,
+  alignItems: "center",
+  gap: 8,
+  padding: "10px 14px",
+  background: "#D1FAE5",
+  border: "1px solid #A7F3D0",
+  borderRadius: 8,
+  fontSize: 13,
+  color: "#065F46",
 };
 
 const dlStyle: React.CSSProperties = {
@@ -463,11 +607,4 @@ const copyBtnStyle: React.CSSProperties = {
   borderRadius: 6,
   padding: "3px 10px",
   cursor: "pointer",
-};
-
-const successNoteStyle: React.CSSProperties = {
-  margin: 0,
-  fontSize: 13,
-  color: chrome.mutedFg,
-  lineHeight: 1.5,
 };
