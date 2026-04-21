@@ -19,6 +19,8 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
+    Numeric,
     String,
     UniqueConstraint,
 )
@@ -318,3 +320,172 @@ class PacketFile(Base):
     )
 
     packet: Mapped[Packet] = relationship(back_populates="files")
+
+
+# Mirrors migration 0008's CHECK constraints. Kept here so any Python-side
+# construction of an ECV row can reference the canonical set without a
+# DB round-trip.
+ECV_DOC_STATUSES: tuple[str, ...] = ("found", "missing")
+ECV_PAGE_ISSUE_TYPES: tuple[str, ...] = ("blank_page", "low_quality", "rotated")
+
+
+class EcvSection(Base):
+    """One weighted validation section for a packet's ECV run.
+
+    13 rows per packet today, keyed 1-13 by `section_number`. `score` is
+    the per-section weighted score (0-100) that rolls up into the overall
+    ECV score; `weight` is the relative weight applied during rollup.
+    """
+
+    __tablename__ = "ecv_sections"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    packet_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("packets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    section_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    line_items: Mapped[list[EcvLineItem]] = relationship(
+        back_populates="section",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("packet_id", "section_number", name="ecv_sections_packet_section_unique"),
+    )
+
+
+class EcvDocument(Base):
+    """One row of the MISMO-tagged document inventory for a packet.
+
+    Maps 1:1 to the demo's `DOCUMENT_INVENTORY` entries — 23 found + 2
+    missing for the seeded canned run. `page_issue_*` captures the
+    per-page quality flags (blank / low-quality / rotated) shown in the
+    Documents tab.
+    """
+
+    __tablename__ = "ecv_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    packet_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("packets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    doc_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    mismo_type: Mapped[str] = mapped_column(String, nullable=False)
+    pages_display: Mapped[str] = mapped_column(String, nullable=False)
+    page_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    page_issue_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    page_issue_detail: Mapped[str | None] = mapped_column(String, nullable=True)
+    page_issue_affected_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in ECV_DOC_STATUSES) + ")",
+            name="ecv_documents_status_check",
+        ),
+        CheckConstraint(
+            "page_issue_type IS NULL OR page_issue_type IN ("
+            + ", ".join(f"'{t}'" for t in ECV_PAGE_ISSUE_TYPES)
+            + ")",
+            name="ecv_documents_page_issue_type_check",
+        ),
+        UniqueConstraint("packet_id", "doc_number", name="ecv_documents_packet_doc_unique"),
+    )
+
+
+class EcvLineItem(Base):
+    """One validation check inside an `EcvSection`.
+
+    ~58 rows per packet for the seeded canned run. `mismo_path`,
+    `document_id`, and `page_refs` are intentionally nullable — today's
+    canned data leaves them unset, but the Phase 7 evidence / MISMO
+    primitives will populate them without requiring another migration.
+    """
+
+    __tablename__ = "ecv_line_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    section_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ecv_sections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    packet_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("packets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    item_code: Mapped[str] = mapped_column(String, nullable=False)
+    check_description: Mapped[str] = mapped_column(String, nullable=False)
+    result_text: Mapped[str] = mapped_column(String, nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    mismo_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ecv_documents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    page_refs: Mapped[object | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    section: Mapped[EcvSection] = relationship(back_populates="line_items")
+
+    __table_args__ = (
+        UniqueConstraint("packet_id", "item_code", name="ecv_line_items_packet_item_unique"),
+        CheckConstraint(
+            "confidence BETWEEN 0 AND 100",
+            name="ecv_line_items_confidence_range_check",
+        ),
+    )
