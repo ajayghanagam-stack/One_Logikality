@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -104,3 +104,45 @@ async def login(
 @router.get("/me", response_model=UserOut)
 async def me(user: Annotated[User, Depends(get_current_user)]) -> UserOut:
     return UserOut.from_orm(user)
+
+
+class ChangePasswordRequest(BaseModel):
+    """Self-service password change. Used by US-1.8 (platform admin) and
+    US-2.1 (customer admin) — same endpoint, role-agnostic because every
+    authenticated user should be able to rotate their own password.
+
+    `current_password` is verified server-side; no tokens are revoked on
+    success today (the JWT signed with the old password still works until
+    expiry). Revocation lands alongside refresh tokens in a later phase.
+    """
+
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    payload: ChangePasswordRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    # Constant-time verify against the stored hash. A wrong current password
+    # returns 400 rather than 401 so the client doesn't interpret it as a
+    # session-expired signal and bounce the admin back to /login.
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="current password is incorrect",
+        )
+
+    # Reject no-op rotations — cheap to check and saves a confusing UX where
+    # the admin types the same password twice and believes it changed.
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="new password must differ from the current password",
+        )
+
+    user.password_hash = hash_password(payload.new_password)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
