@@ -59,6 +59,7 @@ function sectionsFor(role: Role, orgSlug: string | null): NavSection[] {
       heading: "Platform",
       items: [
         { href: base, label: "Home", icon: "🏠" },
+        { href: `${base}/upload`, label: "Upload", icon: "⬆️" },
         { href: `${base}/ecv`, label: "ECV Dashboard", icon: "🔍" },
       ],
     },
