@@ -79,3 +79,18 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+
+
+async def require_platform_admin(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Dependency for platform-admin-only routes. Chains off `get_current_user`
+    so the tenant context and user lookup already ran; this layer just
+    enforces the role. Returns 403 (not 401) for authenticated-but-wrong-role
+    so callers can distinguish "log in" from "you're in the wrong portal"."""
+    if user.role != "platform_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="platform admin only",
+        )
+    return user
