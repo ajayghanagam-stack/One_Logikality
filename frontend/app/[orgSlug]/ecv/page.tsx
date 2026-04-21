@@ -21,6 +21,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, api } from "@/lib/api";
+import { MICRO_APPS } from "@/lib/apps";
 import { useAuth, useRequireRole } from "@/lib/auth";
 import { chrome, typography } from "@/lib/brand";
 import { LOAN_PROGRAMS } from "@/lib/rules";
@@ -99,11 +100,24 @@ type Summary = {
   documents_missing: number;
 };
 
+type MissingDoc = {
+  mismo_type: string;
+  name: string;
+  reason: string;
+};
+
+type AppGating = {
+  app_id: string;
+  status: "ready" | "blocked";
+  missing_docs: MissingDoc[];
+};
+
 type EcvDashboard = {
   packet: Packet;
   summary: Summary;
   sections: Section[];
   documents: EcvDocument[];
+  app_gating: AppGating[];
 };
 
 /* ----- semantic palette (only tokens not in chrome) ------------------- */
@@ -234,12 +248,18 @@ function Dashboard({
   onReupload: () => void;
   onOverrideChanged: () => void;
 }) {
-  const { packet, summary, sections, documents } = data;
+  const { packet, summary, sections, documents, app_gating: appGating } = data;
   const [tab, setTab] = useState<"documents" | "sections" | "review">("documents");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [reviewFilter, setReviewFilter] = useState<"all" | "critical" | "review">("all");
   const [overrideOpen, setOverrideOpen] = useState(false);
+  // Gating UX state (US-5.2 / US-5.3). `blockedDialog` is the app
+  // currently being inspected in the modal; `proceedAnyway` remembers
+  // which blocked apps the user has explicitly chosen to open despite
+  // the missing docs — matches the demo's per-session override.
+  const [blockedDialog, setBlockedDialog] = useState<string | null>(null);
+  const [proceedAnyway, setProceedAnyway] = useState<Record<string, boolean>>({});
 
   const program = LOAN_PROGRAMS[packet.declared_program_id];
   const effectiveProgramId = packet.program_override?.program_id ?? packet.declared_program_id;
@@ -429,6 +449,18 @@ function Dashboard({
         />
       </section>
 
+      {/* Downstream-app launcher (US-5.2 / US-5.3).
+          Only renders when the org is subscribed to at least one app;
+          otherwise there's nothing to launch and the panel is a visual
+          dead weight. */}
+      {appGating.length > 0 && (
+        <AppLauncher
+          gating={appGating}
+          proceedAnyway={proceedAnyway}
+          onBlockedClick={(appId) => setBlockedDialog(appId)}
+        />
+      )}
+
       {/* Tab bar */}
       <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${chrome.border}`, marginBottom: 20 }}>
         {(
@@ -584,6 +616,29 @@ function Dashboard({
           }}
         />
       )}
+
+      {blockedDialog &&
+        (() => {
+          const g = appGating.find((a) => a.app_id === blockedDialog);
+          const meta = MICRO_APPS.find((a) => a.id === blockedDialog);
+          if (!g || !meta) return null;
+          return (
+            <BlockedAppDialog
+              appName={meta.name}
+              appIcon={meta.icon}
+              missingDocs={g.missing_docs}
+              onClose={() => setBlockedDialog(null)}
+              onUpload={() => {
+                setBlockedDialog(null);
+                onReupload();
+              }}
+              onProceedAnyway={() => {
+                setProceedAnyway((prev) => ({ ...prev, [blockedDialog]: true }));
+                setBlockedDialog(null);
+              }}
+            />
+          );
+        })()}
     </div>
   );
 }
@@ -2111,3 +2166,453 @@ const ctaBtnStyle: React.CSSProperties = {
   cursor: "pointer",
   fontFamily: typography.fontFamily.primary,
 };
+
+/* ----- app launcher (US-5.2 / US-5.3) -------------------------------- */
+
+/**
+ * Side-rail launcher listing every subscribed+enabled micro-app with
+ * its gating state. Mirrors the demo's "Available apps" card on the
+ * ECV page: one row per app, icon + name + a tonal badge.
+ *
+ * Three states:
+ *   - READY   — all required MISMO docs present; clicking launches the
+ *               app (no-op for now since downstream apps aren't built).
+ *   - PARTIAL — docs missing but the user chose "Proceed anyway" in the
+ *               blocked dialog; clicking still launches.
+ *   - BLOCKED — docs missing and not yet proceeded; clicking opens the
+ *               BlockedAppDialog with the manifest.
+ *
+ * ECV appears as a no-op ready row for completeness; it never gates.
+ */
+function AppLauncher({
+  gating,
+  proceedAnyway,
+  onBlockedClick,
+}: {
+  gating: AppGating[];
+  proceedAnyway: Record<string, boolean>;
+  onBlockedClick: (appId: string) => void;
+}) {
+  return (
+    <section style={{ ...cardStyle, padding: 16, marginBottom: 20 }}>
+      <div
+        style={{
+          fontSize: 10,
+          fontWeight: 700,
+          color: chrome.mutedFg,
+          letterSpacing: 0.8,
+          textTransform: "uppercase",
+          marginBottom: 12,
+        }}
+      >
+        Available apps
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+          gap: 8,
+        }}
+      >
+        {gating.map((g) => {
+          const meta = MICRO_APPS.find((a) => a.id === g.app_id);
+          if (!meta) return null;
+          const isBlocked = g.status === "blocked" && !proceedAnyway[g.app_id];
+          const isPartial = g.status === "blocked" && proceedAnyway[g.app_id];
+          const isReady = g.status === "ready";
+
+          return (
+            <button
+              key={g.app_id}
+              type="button"
+              disabled={g.app_id === "ecv"}
+              onClick={() => {
+                if (isBlocked) onBlockedClick(g.app_id);
+                // READY / PARTIAL launch paths wire up when the
+                // downstream app pages land. No-op for now.
+              }}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 8,
+                textAlign: "left",
+                cursor: g.app_id === "ecv" ? "default" : "pointer",
+                background: isBlocked
+                  ? `${DESTRUCTIVE_BG}80`
+                  : "transparent",
+                border: `1px solid ${
+                  isBlocked
+                    ? `${DESTRUCTIVE}33`
+                    : chrome.border
+                }`,
+                borderLeft: isBlocked
+                  ? `3px solid ${DESTRUCTIVE}`
+                  : `3px solid ${chrome.border}`,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                transition: "all 0.15s",
+                fontFamily: typography.fontFamily.primary,
+              }}
+            >
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 8,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: isBlocked
+                    ? "#fff"
+                    : isPartial
+                      ? chrome.amberBg
+                      : isReady
+                        ? SUCCESS_BG
+                        : chrome.muted,
+                  border: `1px solid ${
+                    isBlocked
+                      ? `${DESTRUCTIVE}40`
+                      : isPartial
+                        ? chrome.amberLight
+                        : isReady
+                          ? SUCCESS_BORDER
+                          : chrome.border
+                  }`,
+                  fontSize: 15,
+                  flexShrink: 0,
+                }}
+              >
+                {meta.icon}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: chrome.charcoal,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {meta.name}
+                </div>
+                <div style={{ marginTop: 3 }}>
+                  {isBlocked && (
+                    <span
+                      style={{
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: DESTRUCTIVE,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 3,
+                        letterSpacing: 0.4,
+                      }}
+                    >
+                      <AlertIcon size={9} color={DESTRUCTIVE} /> BLOCKED ·{" "}
+                      {g.missing_docs.length} missing
+                    </span>
+                  )}
+                  {isPartial && (
+                    <span
+                      style={{
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: "#92400E",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 3,
+                        letterSpacing: 0.4,
+                      }}
+                    >
+                      PARTIAL · {g.missing_docs.length} missing
+                    </span>
+                  )}
+                  {isReady && g.app_id !== "ecv" && (
+                    <span
+                      style={{
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: SUCCESS,
+                        letterSpacing: 0.4,
+                      }}
+                    >
+                      READY
+                    </span>
+                  )}
+                  {g.app_id === "ecv" && (
+                    <span style={{ fontSize: 9, color: chrome.mutedFg }}>
+                      Foundational
+                    </span>
+                  )}
+                </div>
+              </div>
+              {g.app_id !== "ecv" && (
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: isBlocked ? DESTRUCTIVE : chrome.amber,
+                    fontWeight: 600,
+                  }}
+                >
+                  →
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* ----- blocked-app dialog (US-5.2) ----------------------------------- */
+
+/**
+ * Explains *why* an app is blocked: lists every missing MISMO doc with
+ * the reason it's required, and offers two escapes — "Upload missing
+ * documents" (routes back to the upload page) or "Proceed anyway"
+ * (flags the session override so the launcher shows PARTIAL).
+ *
+ * Port of the demo's `components/shared/blocked-app-dialog.tsx`;
+ * styling and copy preserved 1:1.
+ */
+function BlockedAppDialog({
+  appName,
+  appIcon,
+  missingDocs,
+  onClose,
+  onUpload,
+  onProceedAnyway,
+}: {
+  appName: string;
+  appIcon: string;
+  missingDocs: MissingDoc[];
+  onClose: () => void;
+  onUpload: () => void;
+  onProceedAnyway: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 50,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(0,0,0,0.5)",
+        backdropFilter: "blur(4px)",
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: chrome.card,
+          borderRadius: 16,
+          maxWidth: 520,
+          width: "90%",
+          boxShadow: "0 8px 40px rgba(0,0,0,0.2)",
+          overflow: "hidden",
+        }}
+      >
+        {/* Header — red accent */}
+        <div
+          style={{
+            background: DESTRUCTIVE_BG,
+            borderBottom: `1px solid ${DESTRUCTIVE}30`,
+            padding: "20px 24px",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 14,
+          }}
+        >
+          <div
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 10,
+              background: `${DESTRUCTIVE}18`,
+              border: `1px solid ${DESTRUCTIVE}30`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 22,
+              flexShrink: 0,
+            }}
+          >
+            {appIcon}
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <h3
+                style={{
+                  fontSize: 16,
+                  fontWeight: 700,
+                  margin: 0,
+                  color: chrome.charcoal,
+                  fontFamily: typography.fontFamily.primary,
+                }}
+              >
+                {appName}
+              </h3>
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 700,
+                  color: DESTRUCTIVE,
+                  background: DESTRUCTIVE_BG,
+                  border: `1px solid ${DESTRUCTIVE}30`,
+                  padding: "2px 8px",
+                  borderRadius: 4,
+                  letterSpacing: 0.4,
+                }}
+              >
+                BLOCKED
+              </span>
+            </div>
+            <p
+              style={{
+                fontSize: 12,
+                color: DESTRUCTIVE,
+                margin: "4px 0 0",
+                lineHeight: 1.5,
+              }}
+            >
+              This app cannot produce complete results because{" "}
+              {missingDocs.length} required document
+              {missingDocs.length > 1 ? "s are" : " is"} missing from the packet.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              background: "none",
+              border: "none",
+              fontSize: 18,
+              cursor: "pointer",
+              color: chrome.mutedFg,
+              padding: "0 4px",
+            }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Missing documents list */}
+        <div style={{ padding: "20px 24px" }}>
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: DESTRUCTIVE,
+              letterSpacing: 0.8,
+              textTransform: "uppercase",
+              marginBottom: 10,
+            }}
+          >
+            Missing documents ({missingDocs.length})
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {missingDocs.map((doc) => (
+              <div
+                key={doc.mismo_type}
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: 8,
+                  background: chrome.bg,
+                  border: `1px solid ${chrome.border}`,
+                  borderLeft: `3px solid ${DESTRUCTIVE}`,
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 4,
+                  }}
+                >
+                  <XIcon size={14} color={DESTRUCTIVE} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>
+                    {doc.name}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    paddingLeft: 22,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontFamily: "monospace",
+                      color: chrome.mutedFg,
+                      background: chrome.muted,
+                      padding: "1px 5px",
+                      borderRadius: 3,
+                    }}
+                  >
+                    {doc.mismo_type}
+                  </span>
+                  <span style={{ fontSize: 11, color: chrome.mutedFg }}>
+                    — {doc.reason}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div
+          style={{
+            padding: "16px 24px 20px",
+            borderTop: `1px solid ${chrome.border}`,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+          }}
+        >
+          <button
+            type="button"
+            onClick={onUpload}
+            style={{ ...ctaBtnStyle, width: "100%", padding: "12px 20px" }}
+          >
+            Upload missing documents
+          </button>
+          <button
+            type="button"
+            onClick={onProceedAnyway}
+            style={{
+              width: "100%",
+              padding: "10px 20px",
+              fontSize: 13,
+              fontWeight: 600,
+              borderRadius: 8,
+              border: `1px solid ${chrome.border}`,
+              background: chrome.card,
+              color: chrome.mutedFg,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              fontFamily: typography.fontFamily.primary,
+            }}
+          >
+            <AlertIcon size={14} color={chrome.mutedFg} />
+            Proceed anyway — results will be incomplete
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
