@@ -1,21 +1,23 @@
 "use client";
 
 /**
- * Packet upload page (US-3.1 / US-3.2 / US-3.3).
+ * Packet upload page (US-3.1 / US-3.2 / US-3.3 / US-3.4).
  *
  * Drag-drop + file picker for PDF/PNG/JPEG, a loan-program selector
  * that drives the right rule set, and a facts panel previewing which
  * values will apply. Layout and copy mirror the `one-logikality-demo`
  * reference so both products feel like one family.
  *
- * Submits multipart to `POST /api/packets`. The ECV pipeline animation
- * and the post-upload ECV dashboard ship in a subsequent slice; for now
- * we render a minimal success card confirming the packet was stored.
+ * Submits multipart to `POST /api/packets`. On success the page hands
+ * off to `<PipelineProgress>` which polls the packet's server state
+ * until it reaches `completed`, then routes the user to the ECV
+ * dashboard (US-3.4).
  */
 
 import { useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 
+import { PipelineProgress } from "@/components/pipeline-progress";
 import { ApiError } from "@/lib/api";
 import { useAuth, useRequireRole } from "@/lib/auth";
 import { chrome, typography } from "@/lib/brand";
@@ -23,19 +25,10 @@ import { LOAN_PROGRAMS } from "@/lib/rules";
 
 type QueuedFile = { file: File; id: string };
 
-type PacketFileOut = {
+type PacketCreatedResponse = {
+  // The full PacketOut carries more — we only need the id to hand off
+  // to `<PipelineProgress>`, which polls the packet itself.
   id: string;
-  filename: string;
-  size_bytes: number;
-  content_type: string;
-};
-
-type PacketOut = {
-  id: string;
-  declared_program_id: string;
-  status: string;
-  created_at: string;
-  files: PacketFileOut[];
 };
 
 const ACCEPT = ".pdf,.png,.jpg,.jpeg";
@@ -44,6 +37,7 @@ const ACCEPT_RE = /\.(pdf|png|jpg|jpeg)$/i;
 export default function UploadPage() {
   const params = useParams<{ orgSlug: string }>();
   const orgSlug = params.orgSlug;
+  const router = useRouter();
   const { ready } = useRequireRole(
     ["customer_admin", "customer_user"],
     `/${orgSlug}`,
@@ -54,7 +48,12 @@ export default function UploadPage() {
   const [programId, setProgramId] = useState<string>("conventional");
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<PacketOut | null>(null);
+  // Non-null once `POST /api/packets` succeeds — drives the
+  // full-screen `<PipelineProgress>` overlay which polls server state
+  // and routes to the ECV dashboard on completion.
+  const [processingPacketId, setProcessingPacketId] = useState<string | null>(
+    null,
+  );
   const [submitError, setSubmitError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -100,15 +99,19 @@ export default function UploadPage() {
         } catch {
           // response wasn't JSON
         }
-        throw new ApiError(res.status, detail, detail ?? `upload failed: ${res.status}`);
+        throw new ApiError(
+          res.status,
+          detail,
+          detail ?? `upload failed: ${res.status}`,
+        );
       }
-      const payload: PacketOut = await res.json();
-      setResult(payload);
+      const payload: PacketCreatedResponse = await res.json();
       setQueued([]);
+      setProcessingPacketId(payload.id);
     } catch (err) {
       const msg =
         err instanceof ApiError
-          ? err.detail ?? `Upload failed (${err.status}).`
+          ? (err.detail ?? `Upload failed (${err.status}).`)
           : "Upload failed. Please try again.";
       setSubmitError(msg);
     } finally {
@@ -116,80 +119,78 @@ export default function UploadPage() {
     }
   }
 
-  function resetForAnother() {
-    setResult(null);
-    setQueued([]);
-    setSubmitError(null);
-  }
-
   return (
     <div style={{ maxWidth: 800 }}>
+      {processingPacketId && token ? (
+        <PipelineProgress
+          packetId={processingPacketId}
+          token={token}
+          onComplete={() =>
+            router.push(`/${orgSlug}/ecv?packet=${processingPacketId}`)
+          }
+        />
+      ) : null}
+
       <h1 style={titleStyle}>Upload documents</h1>
       <p style={subtitleStyle}>
-        {user?.full_name ? orgDisplay(user.full_name) : "Your organization"}{" "}
-        · Upload your mortgage document packet for ECV analysis
+        {user?.full_name ? orgDisplay(user.full_name) : "Your organization"} ·
+        Upload your mortgage document packet for ECV analysis
       </p>
 
-      {result ? (
-        <SuccessCard packet={result} onAnother={resetForAnother} />
-      ) : (
-        <>
-          <Dropzone
-            dragActive={dragActive}
-            onClick={() => inputRef.current?.click()}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragActive(true);
-            }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragActive(false);
-              addFiles(e.dataTransfer.files);
-            }}
-          />
-          <input
-            ref={inputRef}
-            type="file"
-            accept={ACCEPT}
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => {
-              if (e.target.files) addFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
+      <Dropzone
+        dragActive={dragActive}
+        onClick={() => inputRef.current?.click()}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragActive(true);
+        }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragActive(false);
+          addFiles(e.dataTransfer.files);
+        }}
+      />
+      <input
+        ref={inputRef}
+        type="file"
+        accept={ACCEPT}
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          if (e.target.files) addFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
 
-          {queued.length > 0 ? (
-            <FileList
-              files={queued}
-              totalBytes={totalBytes}
-              onRemove={removeQueued}
-            />
-          ) : null}
+      {queued.length > 0 ? (
+        <FileList
+          files={queued}
+          totalBytes={totalBytes}
+          onRemove={removeQueued}
+        />
+      ) : null}
 
-          <ProgramPanel programId={programId} onChange={setProgramId} />
+      <ProgramPanel programId={programId} onChange={setProgramId} />
 
-          {submitError ? (
-            <div role="alert" style={errorStyle}>
-              {submitError}
-            </div>
-          ) : null}
+      {submitError ? (
+        <div role="alert" style={errorStyle}>
+          {submitError}
+        </div>
+      ) : null}
 
-          <button
-            type="button"
-            onClick={handleAnalyze}
-            disabled={queued.length === 0 || submitting}
-            style={{
-              ...analyzeBtnStyle,
-              opacity: queued.length === 0 || submitting ? 0.5 : 1,
-              cursor: queued.length === 0 || submitting ? "not-allowed" : "pointer",
-            }}
-          >
-            {submitting ? "Uploading…" : `Analyze packet (${program.label})`}
-          </button>
-        </>
-      )}
+      <button
+        type="button"
+        onClick={handleAnalyze}
+        disabled={queued.length === 0 || submitting}
+        style={{
+          ...analyzeBtnStyle,
+          opacity: queued.length === 0 || submitting ? 0.5 : 1,
+          cursor: queued.length === 0 || submitting ? "not-allowed" : "pointer",
+        }}
+      >
+        {submitting ? "Uploading…" : `Analyze packet (${program.label})`}
+      </button>
     </div>
   );
 }
@@ -274,7 +275,14 @@ function FileList({
   onRemove: (id: string) => void;
 }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 20 }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        marginBottom: 20,
+      }}
+    >
       {files.map((q) => (
         <div key={q.id} style={fileRowStyle}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -331,15 +339,30 @@ function ProgramPanel({
       ? p.guidelines.substring(0, 24) + "…"
       : p.guidelines;
   const facts: { label: string; value: string; help?: string }[] = [
-    { label: "DTI limit", value: `${p.dtiLimit}%`, help: "Maximum debt-to-income ratio" },
-    { label: "Chain depth", value: `${p.chainDepth} yrs`, help: "Years of title history to search" },
+    {
+      label: "DTI limit",
+      value: `${p.dtiLimit}%`,
+      help: "Maximum debt-to-income ratio",
+    },
+    {
+      label: "Chain depth",
+      value: `${p.chainDepth} yrs`,
+      help: "Years of title history to search",
+    },
     { label: "Framework", value: shortFramework, help: p.regulatoryFramework },
     { label: "Guidelines", value: shortGuidelines, help: p.guidelines },
   ];
 
   return (
     <div style={programCardStyle}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 10,
+        }}
+      >
         <div style={programIconStyle}>
           <svg
             width="13"
@@ -356,11 +379,14 @@ function ProgramPanel({
           </svg>
         </div>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: chrome.charcoal }}>
+          <div
+            style={{ fontSize: 13, fontWeight: 700, color: chrome.charcoal }}
+          >
             Loan program
           </div>
           <div style={{ fontSize: 11, color: chrome.mutedFg }}>
-            Declare the program for this packet. ECV will confirm against your documents.
+            Declare the program for this packet. ECV will confirm against your
+            documents.
           </div>
         </div>
       </div>
@@ -387,7 +413,14 @@ function ProgramPanel({
             </div>
           ))}
         </div>
-        <div style={{ fontSize: 11, color: chrome.amberDark, lineHeight: 1.5, fontStyle: "italic" }}>
+        <div
+          style={{
+            fontSize: 11,
+            color: chrome.amberDark,
+            lineHeight: 1.5,
+            fontStyle: "italic",
+          }}
+        >
           {p.description}
         </div>
         {p.residualIncome ? (
@@ -399,69 +432,6 @@ function ProgramPanel({
           </div>
         ) : null}
       </div>
-    </div>
-  );
-}
-
-function SuccessCard({
-  packet,
-  onAnother,
-}: {
-  packet: PacketOut;
-  onAnother: () => void;
-}) {
-  const totalMb =
-    packet.files.reduce((s, f) => s + f.size_bytes, 0) / 1024 / 1024;
-  const program = LOAN_PROGRAMS[packet.declared_program_id];
-  return (
-    <div style={successCardStyle}>
-      <div style={successHeaderStyle}>
-        <div style={successIconStyle}>
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </div>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: chrome.charcoal }}>
-            Packet uploaded
-          </div>
-          <div style={{ fontSize: 12, color: chrome.mutedFg, marginTop: 2 }}>
-            {packet.files.length} file{packet.files.length === 1 ? "" : "s"} ·{" "}
-            {totalMb.toFixed(1)} MB · {program?.label ?? packet.declared_program_id}
-          </div>
-        </div>
-      </div>
-
-      <dl style={metaListStyle}>
-        <div style={metaRowStyle}>
-          <dt style={metaLabelStyle}>Packet ID</dt>
-          <dd style={metaValueMonoStyle}>{packet.id}</dd>
-        </div>
-        <div style={metaRowStyle}>
-          <dt style={metaLabelStyle}>Status</dt>
-          <dd style={metaValueStyle}>
-            <span style={statusPillStyle}>{packet.status}</span>
-          </dd>
-        </div>
-      </dl>
-
-      <div style={pipelineNoteStyle}>
-        Your packet is saved. Full ECV analysis (OCR → Classify → Extract →
-        Validate → Analyze) ships in the next release.
-      </div>
-
-      <button type="button" onClick={onAnother} style={anotherBtnStyle}>
-        Upload another packet
-      </button>
     </div>
   );
 }
@@ -649,105 +619,4 @@ const errorStyle: React.CSSProperties = {
   padding: "8px 12px",
   fontSize: 12,
   marginBottom: 12,
-};
-
-const successCardStyle: React.CSSProperties = {
-  background: chrome.card,
-  border: `1px solid ${chrome.border}`,
-  borderRadius: 12,
-  padding: "22px 24px",
-  boxShadow: "0 1px 3px rgba(20,18,14,0.04)",
-};
-
-const successHeaderStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 14,
-  marginBottom: 18,
-};
-
-const successIconStyle: React.CSSProperties = {
-  width: 42,
-  height: 42,
-  borderRadius: 10,
-  background: "#D1FAE5",
-  border: "1px solid #A7F3D0",
-  color: "#059669",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
-
-const metaListStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 8,
-  margin: "0 0 16px",
-  padding: 0,
-};
-
-const metaRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  padding: "8px 12px",
-  background: chrome.muted,
-  borderRadius: 6,
-};
-
-const metaLabelStyle: React.CSSProperties = {
-  fontSize: 11,
-  color: chrome.mutedFg,
-  fontWeight: 600,
-  letterSpacing: 0.3,
-  textTransform: "uppercase",
-  margin: 0,
-};
-
-const metaValueStyle: React.CSSProperties = {
-  fontSize: 12,
-  color: chrome.charcoal,
-  margin: 0,
-};
-
-const metaValueMonoStyle: React.CSSProperties = {
-  ...metaValueStyle,
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
-  fontSize: 11,
-};
-
-const statusPillStyle: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 700,
-  padding: "2px 8px",
-  borderRadius: 10,
-  background: "#DBEAFE",
-  color: "#1E40AF",
-  border: "1px solid #93C5FD",
-  letterSpacing: 0.4,
-  textTransform: "uppercase",
-};
-
-const pipelineNoteStyle: React.CSSProperties = {
-  padding: "10px 14px",
-  background: chrome.amberBg,
-  border: `1px solid ${chrome.amberLight}`,
-  borderRadius: 8,
-  fontSize: 12,
-  color: chrome.amberDark,
-  lineHeight: 1.5,
-  marginBottom: 18,
-};
-
-const anotherBtnStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "11px 18px",
-  fontSize: 13,
-  fontWeight: 600,
-  background: "#fff",
-  color: chrome.charcoal,
-  border: `1px solid ${chrome.border}`,
-  borderRadius: 8,
-  cursor: "pointer",
-  fontFamily: typography.fontFamily.primary,
 };
