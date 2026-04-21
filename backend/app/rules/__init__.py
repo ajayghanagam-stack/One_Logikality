@@ -13,6 +13,7 @@ keys on both sides removes a translation layer between Python and
 TypeScript.
 """
 
+from app.rules.app_docs import APP_REQUIRED_DOCS, RequiredDoc
 from app.rules.catalog import (
     LOAN_PROGRAM_IDS,
     LOAN_PROGRAMS,
@@ -33,6 +34,7 @@ from app.rules.resolver import (
 from app.rules.validator import find_schema, validate_rule_value
 
 __all__ = [
+    "APP_REQUIRED_DOCS",
     "EditableRuleSchema",
     "EffectiveRule",
     "LOAN_PROGRAM_IDS",
@@ -40,6 +42,7 @@ __all__ = [
     "LoanProgramRules",
     "MICRO_APP_RULES",
     "RULE_APP_IDS",
+    "RequiredDoc",
     "RuleOverride",
     "RuleValue",
     "find_schema",

@@ -36,9 +36,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.storage_local import get_storage
 from app.db import get_session
 from app.deps import require_customer_admin, require_customer_role
-from app.models import EcvDocument, EcvLineItem, EcvSection, Packet, PacketFile, User
+from app.models import (
+    APP_IDS,
+    AppSubscription,
+    EcvDocument,
+    EcvLineItem,
+    EcvSection,
+    Packet,
+    PacketFile,
+    User,
+)
 from app.pipeline.ecv_stub import run_ecv_stub
-from app.rules import LOAN_PROGRAM_IDS
+from app.rules import APP_REQUIRED_DOCS, LOAN_PROGRAM_IDS
 
 router = APIRouter(prefix="/api/packets", tags=["packets"])
 
@@ -245,11 +254,38 @@ class EcvSummaryOut(BaseModel):
     documents_missing: int
 
 
+class MissingDocOut(BaseModel):
+    """One missing MISMO doc type, with the reason it matters (US-5.1)."""
+
+    mismo_type: str
+    name: str
+    reason: str
+
+
+class AppGatingOut(BaseModel):
+    """Per-app gating verdict surfaced by the ECV dashboard (US-5.2 / US-5.3).
+
+    `status` is `ready` when every required MISMO doc type for the app
+    appears as `status='found'` in the packet's document inventory, and
+    `blocked` otherwise. `missing_docs` is always emitted as a list so
+    the frontend can render "BLOCKED · N missing" without a null check;
+    `ready` apps get an empty list.
+
+    Only apps the org is subscribed to AND has enabled appear in the
+    payload — disabled/unsubscribed apps aren't gating candidates.
+    """
+
+    app_id: str
+    status: str
+    missing_docs: list[MissingDocOut]
+
+
 class EcvDashboardOut(BaseModel):
     packet: PacketOut
     summary: EcvSummaryOut
     sections: list[EcvSectionOut]
     documents: list[EcvDocumentOut]
+    app_gating: list[AppGatingOut]
 
 
 # Severity thresholds are surfaced alongside the data so the frontend
@@ -597,9 +633,90 @@ async def get_packet_ecv(
         documents_missing=missing_docs,
     )
 
+    app_gating = await _compute_app_gating(session, packet.org_id, documents)
+
     return EcvDashboardOut(
         packet=packet_out,
         summary=summary,
         sections=section_outs,
         documents=document_outs,
+        app_gating=app_gating,
     )
+
+
+async def _compute_app_gating(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    documents: list[EcvDocument],
+) -> list[AppGatingOut]:
+    """Gating verdict per subscribed+enabled app (US-5.2 / US-5.3).
+
+    Apps the org isn't subscribed to — or has disabled — are omitted
+    entirely so the dashboard launcher only shows what the user could
+    actually open. ECV has no manifest and never gates itself.
+
+    The found/missing split is derived from the packet's `ecv_documents`
+    inventory: a required MISMO type is satisfied only if at least one
+    document of that type is `status='found'`. Missing docs are emitted
+    in manifest order with the demo's friendly names + reasons so the
+    blocked-app dialog reads the same on both products.
+    """
+    # Preserve APP_IDS order so the launcher renders deterministically —
+    # ECV first, then the paid apps in catalog order.
+    subs = (
+        (await session.execute(select(AppSubscription).where(AppSubscription.org_id == org_id)))
+        .scalars()
+        .all()
+    )
+    enabled_ids = {s.app_id for s in subs if s.enabled}
+
+    found_mismo_types = {d.mismo_type for d in documents if d.status == "found"}
+
+    gating: list[AppGatingOut] = []
+    for app_id in APP_IDS:
+        if app_id not in enabled_ids:
+            continue
+        manifest = APP_REQUIRED_DOCS.get(app_id, ())
+        missing = [
+            MissingDocOut(
+                mismo_type=doc["mismo_type"],
+                name=_doc_name_from_mismo(doc["mismo_type"]),
+                reason=doc["reason"],
+            )
+            for doc in manifest
+            if doc["mismo_type"] not in found_mismo_types
+        ]
+        gating.append(
+            AppGatingOut(
+                app_id=app_id,
+                status="blocked" if missing else "ready",
+                missing_docs=missing,
+            )
+        )
+    return gating
+
+
+# Pretty display name per MISMO type — mirrors the demo's friendly labels
+# on the blocked-app dialog. Unknown types fall back to the raw MISMO
+# string so new additions aren't invisible.
+_MISMO_DISPLAY_NAMES: dict[str, str] = {
+    "TITLE_COMMITMENT": "Title Commitment",
+    "WARRANTY_DEED": "Warranty Deed",
+    "DEED_OF_TRUST": "Deed of Trust",
+    "TAX_CERTIFICATE": "Tax Certificate",
+    "LOAN_ESTIMATE": "Loan Estimate",
+    "CLOSING_DISCLOSURE": "Closing Disclosure",
+    "LEAD_PAINT_DISCLOSURE": "Lead Paint Disclosure",
+    "STATE_DISCLOSURE": "State-specific Disclosure",
+    "AFFILIATED_BUSINESS": "Affiliated Business Disclosure",
+    "URLA_1003": "URLA (Form 1003)",
+    "W2_WAGE_STATEMENT": "W-2 Wage Statement",
+    "PAYSTUB": "Paystub",
+    "TAX_RETURN_1040": "1040 Tax Return",
+    "TAX_SCHEDULE_E": "Schedule E",
+    "VOE": "Verification of Employment",
+}
+
+
+def _doc_name_from_mismo(mismo_type: str) -> str:
+    return _MISMO_DISPLAY_NAMES.get(mismo_type, mismo_type)
