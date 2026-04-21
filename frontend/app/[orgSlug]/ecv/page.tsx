@@ -27,6 +27,21 @@ import { LOAN_PROGRAMS } from "@/lib/rules";
 
 /* ----- types ---------------------------------------------------------- */
 
+type ProgramConfirmation = {
+  status: "confirmed" | "conflict" | "inconclusive";
+  suggested_program_id: string | null;
+  evidence: string;
+  documents_analyzed: string[];
+};
+
+type ProgramOverride = {
+  program_id: string;
+  reason: string;
+  overridden_by: string;
+  overridden_by_name: string | null;
+  overridden_at: string;
+};
+
 type Packet = {
   id: string;
   declared_program_id: string;
@@ -35,6 +50,8 @@ type Packet = {
   started_processing_at: string | null;
   completed_at: string | null;
   created_at: string;
+  program_confirmation: ProgramConfirmation | null;
+  program_override: ProgramOverride | null;
 };
 
 type LineItem = {
@@ -121,10 +138,11 @@ export default function EcvPage() {
   const packetId = searchParams.get("packet");
   const router = useRouter();
   const { ready } = useRequireRole(["customer_admin", "customer_user"], `/${orgSlug}`);
-  const { token } = useAuth();
+  const { token, user } = useAuth();
 
   const [data, setData] = useState<EcvDashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     if (!ready || !token || !packetId) return;
@@ -147,7 +165,9 @@ export default function EcvPage() {
     return () => {
       cancelled = true;
     };
-  }, [ready, token, packetId]);
+  }, [ready, token, packetId, reloadTick]);
+
+  const refetch = () => setReloadTick((t) => t + 1);
 
   if (!ready) return null;
 
@@ -188,25 +208,42 @@ export default function EcvPage() {
     );
   }
 
-  return <Dashboard data={data} onReupload={() => router.push(`/${orgSlug}/upload`)} />;
+  return (
+    <Dashboard
+      data={data}
+      token={token}
+      canOverride={user?.role === "customer_admin"}
+      onReupload={() => router.push(`/${orgSlug}/upload`)}
+      onOverrideChanged={refetch}
+    />
+  );
 }
 
 /* ----- dashboard body ------------------------------------------------- */
 
 function Dashboard({
   data,
+  token,
+  canOverride,
   onReupload,
+  onOverrideChanged,
 }: {
   data: EcvDashboard;
+  token: string | null;
+  canOverride: boolean;
   onReupload: () => void;
+  onOverrideChanged: () => void;
 }) {
   const { packet, summary, sections, documents } = data;
   const [tab, setTab] = useState<"documents" | "sections" | "review">("documents");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [reviewFilter, setReviewFilter] = useState<"all" | "critical" | "review">("all");
+  const [overrideOpen, setOverrideOpen] = useState(false);
 
   const program = LOAN_PROGRAMS[packet.declared_program_id];
+  const effectiveProgramId = packet.program_override?.program_id ?? packet.declared_program_id;
+  const effectiveProgram = LOAN_PROGRAMS[effectiveProgramId];
 
   const { itemsToReview, criticalItems, reviewItems } = useMemo(() => {
     const flat = sections.flatMap((sec) =>
@@ -304,9 +341,27 @@ function Dashboard({
               Packet {shortId}
             </h1>
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 13 }}>
-              <HeroField label="Program" value={program?.label ?? packet.declared_program_id} />
+              <HeroField
+                label="Program"
+                value={effectiveProgram?.label ?? effectiveProgramId}
+              />
               <HeroField label="Status" value={packet.status} pill />
               <HeroField label="Uploaded" value={uploaded} />
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <ConfirmationPill
+                confirmation={packet.program_confirmation}
+                override={packet.program_override}
+                declaredProgramLabel={program?.label ?? packet.declared_program_id}
+                suggestedProgramLabel={
+                  packet.program_confirmation?.suggested_program_id
+                    ? (LOAN_PROGRAMS[packet.program_confirmation.suggested_program_id]?.label ??
+                      packet.program_confirmation.suggested_program_id)
+                    : null
+                }
+                canChange={canOverride}
+                onChange={() => setOverrideOpen(true)}
+              />
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 18, flexShrink: 0 }}>
@@ -515,6 +570,20 @@ function Dashboard({
           </button>
         </div>
       </div>
+
+      {overrideOpen && (
+        <OverrideDialog
+          packetId={packet.id}
+          token={token}
+          declaredProgramId={packet.declared_program_id}
+          currentOverride={packet.program_override}
+          onClose={() => setOverrideOpen(false)}
+          onChanged={() => {
+            setOverrideOpen(false);
+            onOverrideChanged();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1342,6 +1411,634 @@ function ChevronIcon({ open, color = "currentColor" }: { open: boolean; color?: 
     >
       <polyline points="9 18 15 12 9 6" />
     </svg>
+  );
+}
+
+/* ----- confirmation pill (US-3.11) ----------------------------------- */
+
+function ConfirmationPill({
+  confirmation,
+  override,
+  declaredProgramLabel,
+  suggestedProgramLabel,
+  canChange,
+  onChange,
+}: {
+  confirmation: ProgramConfirmation | null;
+  override: ProgramOverride | null;
+  declaredProgramLabel: string;
+  suggestedProgramLabel: string | null;
+  canChange: boolean;
+  onChange: () => void;
+}) {
+  // Overridden trumps pipeline confirmation — when a human has decided,
+  // show their decision + the audit trail.
+  if (override) {
+    return (
+      <PillShell
+        tone="amber"
+        icon={<AlertIcon size={14} color={chrome.amber} />}
+        eyebrow="Program changed"
+        body={`From ${declaredProgramLabel} · ${override.overridden_by_name ?? "unknown user"} · ${formatDate(override.overridden_at)}`}
+        detail={override.reason}
+        canChange={canChange}
+        changeLabel="Change again"
+        onChange={onChange}
+      />
+    );
+  }
+
+  if (!confirmation) {
+    // Pipeline hasn't produced a verdict yet. Render a muted placeholder
+    // so the hero layout doesn't collapse.
+    return (
+      <PillShell
+        tone="muted"
+        icon={<InfoIcon size={14} color={chrome.mutedFg} />}
+        eyebrow="Awaiting ECV"
+        body="Confirmation runs during the score stage."
+        detail={null}
+        canChange={false}
+        changeLabel=""
+        onChange={onChange}
+      />
+    );
+  }
+
+  if (confirmation.status === "confirmed") {
+    return (
+      <PillShell
+        tone="success"
+        icon={<CheckIcon size={14} color={SUCCESS} />}
+        eyebrow={`Declared · ${declaredProgramLabel}`}
+        body="Documents confirm this program"
+        detail={confirmation.evidence}
+        canChange={canChange}
+        changeLabel="Change program"
+        onChange={onChange}
+      />
+    );
+  }
+  if (confirmation.status === "conflict") {
+    const suffix = suggestedProgramLabel
+      ? ` Documents suggest ${suggestedProgramLabel}.`
+      : " Documents suggest a different program.";
+    return (
+      <PillShell
+        tone="destructive"
+        icon={<AlertIcon size={14} color={DESTRUCTIVE} />}
+        eyebrow={`Declared · ${declaredProgramLabel}`}
+        body={`Conflict —${suffix}`}
+        detail={confirmation.evidence}
+        canChange={canChange}
+        changeLabel="Change program"
+        onChange={onChange}
+      />
+    );
+  }
+  // inconclusive
+  return (
+    <PillShell
+      tone="muted"
+      icon={<InfoIcon size={14} color={chrome.mutedFg} />}
+      eyebrow={`Declared · ${declaredProgramLabel}`}
+      body="Inconclusive — insufficient evidence in packet"
+      detail={confirmation.evidence}
+      canChange={canChange}
+      changeLabel="Change program"
+      onChange={onChange}
+    />
+  );
+}
+
+function PillShell({
+  tone,
+  icon,
+  eyebrow,
+  body,
+  detail,
+  canChange,
+  changeLabel,
+  onChange,
+}: {
+  tone: "success" | "destructive" | "amber" | "muted";
+  icon: React.ReactNode;
+  eyebrow: string;
+  body: string;
+  detail: string | null;
+  canChange: boolean;
+  changeLabel: string;
+  onChange: () => void;
+}) {
+  const palette = {
+    success: { bg: SUCCESS_BG, border: SUCCESS_BORDER, fg: "#065F46" },
+    destructive: { bg: DESTRUCTIVE_BG, border: DESTRUCTIVE_BORDER, fg: "#991B1B" },
+    amber: { bg: chrome.amberBg, border: chrome.amberLight, fg: chrome.amberDark },
+    muted: { bg: chrome.muted, border: chrome.border, fg: chrome.mutedFg },
+  }[tone];
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        padding: "10px 14px",
+        background: palette.bg,
+        border: `1px solid ${palette.border}`,
+        borderRadius: 10,
+        maxWidth: 640,
+      }}
+    >
+      <div style={{ paddingTop: 2, flexShrink: 0 }}>{icon}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            color: palette.fg,
+            letterSpacing: 0.6,
+            textTransform: "uppercase",
+            marginBottom: 2,
+          }}
+        >
+          {eyebrow}
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal, lineHeight: 1.35 }}>
+          {body}
+        </div>
+        {detail && (
+          <div
+            style={{
+              fontSize: 11,
+              color: chrome.mutedFg,
+              marginTop: 4,
+              lineHeight: 1.5,
+              // Truncate at two lines so the hero stays compact; full
+              // evidence is still available inside the override dialog.
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {detail}
+          </div>
+        )}
+      </div>
+      {canChange && (
+        <button
+          onClick={onChange}
+          style={{
+            flexShrink: 0,
+            padding: "6px 12px",
+            fontSize: 11,
+            fontWeight: 700,
+            letterSpacing: 0.4,
+            textTransform: "uppercase",
+            background: "#fff",
+            color: chrome.amberDark,
+            border: `1px solid ${chrome.amberLight}`,
+            borderRadius: 14,
+            cursor: "pointer",
+            fontFamily: typography.fontFamily.primary,
+          }}
+        >
+          {changeLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function formatDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+/* ----- override dialog (US-3.12) ------------------------------------- */
+
+function OverrideDialog({
+  packetId,
+  token,
+  declaredProgramId,
+  currentOverride,
+  onClose,
+  onChanged,
+}: {
+  packetId: string;
+  token: string | null;
+  declaredProgramId: string;
+  currentOverride: ProgramOverride | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const currentProgramId = currentOverride?.program_id ?? declaredProgramId;
+  const [selectedProgramId, setSelectedProgramId] = useState(currentProgramId);
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const selected = LOAN_PROGRAMS[selectedProgramId];
+  const current = LOAN_PROGRAMS[currentProgramId];
+  const declared = LOAN_PROGRAMS[declaredProgramId];
+  const changed = selectedProgramId !== currentProgramId;
+  const canSave = changed && reason.trim().length >= 5 && !saving;
+
+  const handleSave = async () => {
+    if (!canSave || !selected || !token) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/api/packets/${packetId}/program-override`, {
+        method: "POST",
+        json: { program_id: selectedProgramId, reason: reason.trim() },
+        token,
+      });
+      onChanged();
+    } catch (err) {
+      if (err instanceof ApiError) setError(err.detail ?? `Request failed (${err.status}).`);
+      else setError("Couldn't apply the change.");
+      setSaving(false);
+    }
+  };
+
+  const handleRevert = async () => {
+    if (!token) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api(`/api/packets/${packetId}/program-override`, {
+        method: "DELETE",
+        token,
+      });
+      onChanged();
+    } catch (err) {
+      if (err instanceof ApiError) setError(err.detail ?? `Request failed (${err.status}).`);
+      else setError("Couldn't revert the override.");
+      setSaving(false);
+    }
+  };
+
+  const diffRows: { label: string; current: string; next: string }[] =
+    selected && current
+      ? [
+          { label: "Regulatory framework", current: current.regulatoryFramework, next: selected.regulatoryFramework },
+          { label: "Underwriting guidelines", current: current.guidelines, next: selected.guidelines },
+          { label: "DTI limit", current: `${current.dtiLimit}%`, next: `${selected.dtiLimit}%` },
+          { label: "Chain-of-title depth", current: `${current.chainDepth} years`, next: `${selected.chainDepth} years` },
+          { label: "Confidence threshold", current: `${current.confidenceThreshold}%`, next: `${selected.confidenceThreshold}%` },
+          { label: "Residual income required", current: current.residualIncome ? "Yes" : "No", next: selected.residualIncome ? "Yes" : "No" },
+        ]
+      : [];
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(20,18,14,0.5)",
+        backdropFilter: "blur(4px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: chrome.card,
+          borderRadius: 14,
+          width: "100%",
+          maxWidth: 720,
+          maxHeight: "92vh",
+          overflow: "auto",
+          border: `1px solid ${chrome.border}`,
+          boxShadow: "0 24px 50px rgba(20,18,14,0.25)",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "20px 28px",
+            borderBottom: `1px solid ${chrome.border}`,
+            background: `linear-gradient(to right, ${chrome.amberBg}, ${chrome.amberBg}40)`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: chrome.amberDark,
+                letterSpacing: 1,
+                textTransform: "uppercase",
+                marginBottom: 3,
+              }}
+            >
+              Change loan program · this packet
+            </div>
+            <h2 style={{ fontSize: 19, fontWeight: 700, margin: 0, color: chrome.charcoal, fontFamily: typography.fontFamily.primary }}>
+              Change declared loan program
+            </h2>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: 8,
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              color: chrome.mutedFg,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            aria-label="Close"
+          >
+            <XIcon size={16} color="currentColor" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "22px 28px" }}>
+          {/* Current state context */}
+          <div
+            style={{
+              marginBottom: 20,
+              padding: "12px 14px",
+              background: chrome.muted,
+              borderRadius: 8,
+              fontSize: 12,
+              color: chrome.mutedFg,
+              lineHeight: 1.6,
+            }}
+          >
+            <div>
+              <span style={{ fontWeight: 700, color: chrome.charcoal }}>Declared at upload:</span>{" "}
+              {declared?.label ?? declaredProgramId}
+            </div>
+            {currentOverride && (
+              <div style={{ marginTop: 4 }}>
+                <span style={{ fontWeight: 700, color: chrome.charcoal }}>Currently changed to:</span>{" "}
+                {LOAN_PROGRAMS[currentOverride.program_id]?.label ?? currentOverride.program_id}
+                {" — by "}
+                {currentOverride.overridden_by_name ?? "unknown user"}
+                {" on "}
+                {formatDate(currentOverride.overridden_at)}
+              </div>
+            )}
+          </div>
+
+          {/* Program selector */}
+          <div style={{ marginBottom: 22 }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: 11,
+                fontWeight: 700,
+                color: chrome.mutedFg,
+                letterSpacing: 0.6,
+                textTransform: "uppercase",
+                marginBottom: 10,
+              }}
+            >
+              Select loan program for this packet
+            </label>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
+              {Object.values(LOAN_PROGRAMS).map((p) => {
+                const active = selectedProgramId === p.id;
+                const isDeclared = p.id === declaredProgramId;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setSelectedProgramId(p.id)}
+                    style={{
+                      padding: "12px 14px",
+                      background: active ? chrome.amberBg : chrome.card,
+                      border: active ? `2px solid ${chrome.amber}` : `1px solid ${chrome.border}`,
+                      borderRadius: 9,
+                      textAlign: "left",
+                      cursor: "pointer",
+                      transition: "all 150ms ease",
+                      fontFamily: typography.fontFamily.primary,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: active ? chrome.amberDark : chrome.charcoal }}>
+                        {p.label}
+                      </span>
+                      {isDeclared && (
+                        <span
+                          style={{
+                            fontSize: 9,
+                            fontWeight: 700,
+                            padding: "1px 7px",
+                            borderRadius: 10,
+                            background: chrome.amberLight,
+                            color: chrome.amberDark,
+                            letterSpacing: 0.4,
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          Declared
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 3, lineHeight: 1.4 }}>
+                      {p.description}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Rules diff */}
+          {changed && diffRows.length > 0 && (
+            <div
+              style={{
+                marginBottom: 22,
+                border: `1px solid ${chrome.border}`,
+                borderRadius: 9,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  padding: "10px 14px",
+                  background: `${chrome.amberBg}60`,
+                  borderBottom: `1px solid ${chrome.amberLight}60`,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: chrome.amberDark,
+                  letterSpacing: 0.5,
+                  textTransform: "uppercase",
+                }}
+              >
+                Rules that will change for this packet
+              </div>
+              <div>
+                {diffRows.map((row, idx) => {
+                  const differs = row.current !== row.next;
+                  return (
+                    <div
+                      key={row.label}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr 1fr",
+                        padding: "10px 14px",
+                        borderBottom: idx < diffRows.length - 1 ? `1px solid ${chrome.border}` : "none",
+                        fontSize: 12,
+                        background: differs ? `${chrome.amberBg}20` : "transparent",
+                      }}
+                    >
+                      <div style={{ color: chrome.mutedFg, fontWeight: 500 }}>{row.label}</div>
+                      <div
+                        style={{
+                          color: chrome.charcoal,
+                          textDecoration: differs ? "line-through" : "none",
+                          opacity: differs ? 0.6 : 1,
+                        }}
+                      >
+                        {row.current}
+                      </div>
+                      <div style={{ color: differs ? chrome.amberDark : chrome.charcoal, fontWeight: differs ? 700 : 400 }}>
+                        {differs ? `→ ${row.next}` : row.next}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Reason */}
+          {changed && (
+            <div style={{ marginBottom: 20 }}>
+              <label
+                style={{
+                  display: "block",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: chrome.mutedFg,
+                  letterSpacing: 0.6,
+                  textTransform: "uppercase",
+                  marginBottom: 8,
+                }}
+              >
+                Reason for change <span style={{ color: DESTRUCTIVE }}>*</span>
+              </label>
+              <textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="e.g. Loan officer confirmed this is an FHA refinance; original declaration was wrong."
+                style={{
+                  width: "100%",
+                  minHeight: 72,
+                  padding: "10px 12px",
+                  fontSize: 13,
+                  fontFamily: "inherit",
+                  border: `1px solid ${chrome.border}`,
+                  borderRadius: 8,
+                  background: chrome.card,
+                  color: chrome.charcoal,
+                  resize: "vertical",
+                  boxSizing: "border-box",
+                  lineHeight: 1.5,
+                }}
+              />
+              <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 5 }}>
+                This reason is logged in the audit trail for this packet.
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div
+              role="alert"
+              style={{
+                marginBottom: 16,
+                padding: "10px 14px",
+                background: DESTRUCTIVE_BG,
+                border: `1px solid ${DESTRUCTIVE_BORDER}`,
+                borderRadius: 8,
+                fontSize: 12,
+                color: DESTRUCTIVE,
+              }}
+            >
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div
+          style={{
+            padding: "14px 28px",
+            borderTop: `1px solid ${chrome.border}`,
+            background: `${chrome.muted}80`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            {currentOverride && (
+              <button
+                onClick={handleRevert}
+                disabled={saving}
+                style={{
+                  padding: "8px 14px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: "transparent",
+                  color: DESTRUCTIVE,
+                  border: "none",
+                  cursor: saving ? "not-allowed" : "pointer",
+                  fontFamily: typography.fontFamily.primary,
+                }}
+              >
+                Revert to declared program
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} style={{ ...secondaryBtnStyle, padding: "9px 16px" }}>
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={!canSave}
+              style={{
+                ...ctaBtnStyle,
+                padding: "9px 18px",
+                opacity: canSave ? 1 : 0.5,
+                cursor: canSave ? "pointer" : "not-allowed",
+              }}
+            >
+              {saving ? "Applying…" : "Apply change"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
