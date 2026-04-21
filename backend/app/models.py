@@ -245,6 +245,18 @@ class Packet(Base):
     )
     declared_program_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, server_default="uploaded")
+    # Pipeline animation sync (US-3.4). Populated by the ECV stub / the
+    # real Temporal workflow once it lands. Values are the ids in
+    # app.pipeline.ecv_stub.PIPELINE_STAGES; NULL until processing starts.
+    current_stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_processing_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),

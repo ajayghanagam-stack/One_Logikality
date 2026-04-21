@@ -6,10 +6,11 @@ user) can upload; reads are org-scoped via RLS. The declared program is
 persisted on the row so rule resolution at processing time stays
 reproducible even if org config changes mid-flight.
 
-The ECV pipeline itself lands in the next slice; this endpoint leaves
-packets in `status='uploaded'` and returns the created row. A later
-slice will attach the Temporal workflow and flip the status through
-`processing` → `completed` / `failed`.
+The deterministic ECV stub (US-3.4) runs as a FastAPI BackgroundTask
+after the response is sent; it flips the packet through `processing`
+→ `completed` one stage at a time so the upload → pipeline-animation
+hand-off can sync to real server state. The real Temporal workflow
+replaces the stub in a later slice.
 """
 
 from __future__ import annotations
@@ -18,7 +19,16 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +37,7 @@ from app.adapters.storage_local import get_storage
 from app.db import get_session
 from app.deps import require_customer_role
 from app.models import Packet, PacketFile, User
+from app.pipeline.ecv_stub import run_ecv_stub
 from app.rules import LOAN_PROGRAM_IDS
 
 router = APIRouter(prefix="/api/packets", tags=["packets"])
@@ -53,6 +64,12 @@ class PacketOut(BaseModel):
     id: str
     declared_program_id: str
     status: str
+    # Pipeline-state triple (US-3.4). `current_stage` is one of the ids
+    # in `PIPELINE_STAGES`; all three are NULL until the stub begins
+    # running, and `completed_at` is only set once `status == 'completed'`.
+    current_stage: str | None
+    started_processing_at: datetime | None
+    completed_at: datetime | None
     created_at: datetime
     files: list[PacketFileOut]
 
@@ -67,6 +84,7 @@ def _extension(filename: str) -> str:
 async def create_packet(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_customer_role)],
+    background: BackgroundTasks,
     declared_program_id: Annotated[str, Form()],
     files: Annotated[list[UploadFile], File()],
 ) -> PacketOut:
@@ -144,10 +162,18 @@ async def create_packet(
     await session.commit()
     await session.refresh(packet)
 
+    # Kick off the deterministic ECV stub. BackgroundTasks runs after the
+    # response has been sent, so the client can start polling /api/packets/{id}
+    # immediately and watch `current_stage` tick through PIPELINE_STAGES.
+    background.add_task(run_ecv_stub, packet.id)
+
     return PacketOut(
         id=str(packet.id),
         declared_program_id=packet.declared_program_id,
         status=packet.status,
+        current_stage=packet.current_stage,
+        started_processing_at=packet.started_processing_at,
+        completed_at=packet.completed_at,
         created_at=packet.created_at,
         files=[
             PacketFileOut(
@@ -185,6 +211,9 @@ async def get_packet(
         id=str(packet.id),
         declared_program_id=packet.declared_program_id,
         status=packet.status,
+        current_stage=packet.current_stage,
+        started_processing_at=packet.started_processing_at,
+        completed_at=packet.completed_at,
         created_at=packet.created_at,
         files=[
             PacketFileOut(

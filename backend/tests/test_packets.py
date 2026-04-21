@@ -12,18 +12,32 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import text
 
 from app.config import settings
 from app.db import SessionLocal
+from app.pipeline.ecv_stub import PIPELINE_STAGES
 from app.security import hash_password
+
+
+@pytest.fixture(autouse=True)
+def _fast_pipeline_stub(monkeypatch) -> None:
+    """Pin the stub's per-stage delay to zero for every test in this
+    module. Under httpx's ASGI transport the `BackgroundTasks` attached
+    to the POST response runs to completion before `client.post` returns,
+    so any real delay would multiply the suite's wall time by 6 × delay ×
+    upload-count. Zero keeps the tests snappy and doesn't change any
+    observable behavior: the stub still walks every stage in order."""
+    monkeypatch.setattr("app.pipeline.ecv_stub.STAGE_DELAY_SECONDS", 0)
 
 
 @pytest_asyncio.fixture
@@ -278,6 +292,61 @@ async def test_get_packet_isolated_across_orgs(client: AsyncClient, seeded, stor
             await session.execute(text("DELETE FROM orgs WHERE id = :o"), {"o": other_org})
             await session.commit()
         await _cleanup_packets(seeded["org_id"])
+
+
+# --- pipeline stub (US-3.4) ------------------------------------------
+
+
+async def test_packet_pipeline_runs_to_completion(client: AsyncClient, seeded, storage_tmp) -> None:
+    """POST schedules the ECV stub; by the time we fetch the packet back
+    the stub has walked every stage and left the row in `completed`.
+
+    The POST response is constructed before the background task runs, so
+    `status` is still `uploaded` and `current_stage` is NULL there —
+    that's the initial state the frontend's `PipelineProgress` sees
+    before it starts polling."""
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    files = {"files": ("doc.pdf", io.BytesIO(_pdf_bytes()), "application/pdf")}
+    data = {"declared_program_id": "conventional"}
+    resp = await client.post(
+        "/api/packets",
+        data=data,
+        files=files,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["status"] == "uploaded"
+    assert body["current_stage"] is None
+    assert body["started_processing_at"] is None
+    assert body["completed_at"] is None
+    packet_id = body["id"]
+
+    # Poll a handful of times — with the delay pinned to 0 the stub
+    # completes almost instantly, but the loop keeps the test robust if
+    # the ASGI transport's bg-task scheduling ever changes.
+    payload = None
+    for _ in range(50):
+        fetch = await client.get(
+            f"/api/packets/{packet_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert fetch.status_code == 200
+        payload = fetch.json()
+        if payload["status"] == "completed":
+            break
+        await asyncio.sleep(0.02)
+
+    assert payload is not None
+    assert payload["status"] == "completed"
+    # Last stage in PIPELINE_STAGES is "route" — the stub doesn't clear
+    # current_stage on completion; it leaves the last-seen value for
+    # visual continuity on the final poll.
+    assert payload["current_stage"] == PIPELINE_STAGES[-1]
+    assert payload["started_processing_at"] is not None
+    assert payload["completed_at"] is not None
+    await _cleanup_packets(seeded["org_id"])
 
 
 # --- helpers ----------------------------------------------------------

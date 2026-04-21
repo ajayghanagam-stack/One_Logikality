@@ -1,0 +1,97 @@
+"""Deterministic ECV pipeline stub (US-3.4).
+
+Fakes the multi-stage ECV pipeline so the upload → processing animation
+can sync to real server state before the Temporal workflow lands.
+Stages match `PIPELINE_STAGES` exactly — ingest / classify / extract /
+validate / score / route — so the frontend `PipelineProgress` can port
+the demo's labels/icons without translation.
+
+Scheduled as a FastAPI `BackgroundTask` from `POST /api/packets`; runs
+after the response is sent. Tests monkeypatch `STAGE_DELAY_SECONDS` to
+something tiny so the polling loop terminates quickly without depending
+on real time.
+
+Background tasks don't carry the request's auth context, so writes go
+through the default connection role (postgres superuser in local dev),
+bypassing RLS intentionally — this is server-internal orchestration,
+not a tenant-scoped request. The real ECV pipeline (Temporal workflow)
+will run under a service identity that still enforces tenant isolation.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import update
+
+from app.db import SessionLocal
+from app.models import Packet
+
+log = logging.getLogger(__name__)
+
+# Ordered, frozen — consumed by both the stub runner and the migration
+# 0007 CHECK constraint. If this tuple changes, migration 0007 needs a
+# follow-up to widen the allowed values.
+PIPELINE_STAGES: tuple[str, ...] = (
+    "ingest",
+    "classify",
+    "extract",
+    "validate",
+    "score",
+    "route",
+)
+
+# Per-stage wall-clock delay. 0.8s gives the UI enough breathing room to
+# highlight each stage icon without making the upload feel sluggish.
+# Tests monkeypatch this to ~0.01s so polling terminates fast.
+STAGE_DELAY_SECONDS: float = 0.8
+
+
+async def run_ecv_stub(packet_id: uuid.UUID) -> None:
+    """Walk a packet through the pipeline stages, updating its row after each.
+
+    Flow: flip to `processing` + `started_processing_at`, then per stage
+    write `current_stage=<stage>` and sleep, then flip to `completed` +
+    `completed_at`. Any exception flips the packet to `failed` so the UI
+    polling loop doesn't hang forever.
+    """
+    try:
+        started = datetime.now(UTC)
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Packet)
+                .where(Packet.id == packet_id)
+                .values(status="processing", started_processing_at=started)
+            )
+            await session.commit()
+
+        for stage in PIPELINE_STAGES:
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(Packet).where(Packet.id == packet_id).values(current_stage=stage)
+                )
+                await session.commit()
+            # Module-attribute lookup so monkeypatching works without
+            # callers having to re-import the value.
+            await asyncio.sleep(STAGE_DELAY_SECONDS)
+
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Packet)
+                .where(Packet.id == packet_id)
+                .values(status="completed", completed_at=datetime.now(UTC))
+            )
+            await session.commit()
+    except Exception:
+        log.exception("ECV stub failed for packet %s", packet_id)
+        try:
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(Packet).where(Packet.id == packet_id).values(status="failed")
+                )
+                await session.commit()
+        except Exception:
+            log.exception("also failed to mark packet %s as failed", packet_id)
