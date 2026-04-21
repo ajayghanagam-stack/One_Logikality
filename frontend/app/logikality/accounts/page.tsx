@@ -200,16 +200,25 @@ export default function AccountsPage() {
                 </td>
                 <td style={cellStyle}>{formatDate(a.created_at)}</td>
                 <td style={{ ...cellStyle, textAlign: "right" }}>
-                  <button
-                    type="button"
-                    onClick={() => setPendingDelete(a)}
-                    className="ol-delete-btn"
-                    style={deleteBtnStyle}
-                    aria-label={`Delete ${a.name}`}
-                  >
-                    <TrashIcon />
-                    Delete
-                  </button>
+                  <div style={actionsCellStyle}>
+                    <Link
+                      href={`/logikality/accounts/${a.id}`}
+                      style={manageBtnStyle}
+                      aria-label={`Manage ${a.name}`}
+                    >
+                      Manage
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => setPendingDelete(a)}
+                      className="ol-delete-btn"
+                      style={deleteBtnStyle}
+                      aria-label={`Delete ${a.name}`}
+                    >
+                      <TrashIcon />
+                      Delete
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -501,6 +510,29 @@ const errorStyle: React.CSSProperties = {
   padding: "10px 14px",
   fontSize: 14,
   lineHeight: 1.4,
+};
+
+const actionsCellStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 8,
+  justifyContent: "flex-end",
+};
+
+// Neutral Manage link — primary row action but deliberately understated
+// so the destructive Delete doesn't have to fight it for visual weight.
+const manageBtnStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "5px 12px",
+  fontSize: 11,
+  fontWeight: typography.fontWeight.subheading,
+  color: chrome.amber,
+  background: "#fff",
+  border: `1px solid ${chrome.amber}40`,
+  borderRadius: 6,
+  textDecoration: "none",
+  fontFamily: typography.fontFamily.primary,
 };
 
 // Destructive-action button. Neutral by default, red on hover — matches
