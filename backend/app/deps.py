@@ -94,3 +94,19 @@ async def require_platform_admin(
             detail="platform admin only",
         )
     return user
+
+
+async def require_customer_admin(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Dependency for routes a customer admin owns (user management, app
+    enablement, org configuration). Platform admins are NOT allowed through
+    this gate — they have their own surfaces under `/api/logikality/*` and
+    shouldn't be quietly substituting themselves into a tenant's admin
+    plane. Returns 403 for authenticated-but-wrong-role."""
+    if user.role != "customer_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="customer admin only",
+        )
+    return user
