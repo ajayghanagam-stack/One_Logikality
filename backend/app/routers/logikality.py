@@ -23,8 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps import require_platform_admin
-from app.models import ORG_TYPES, Org, User
+from app.models import APP_IDS, ORG_TYPES, AppSubscription, Org, User
 from app.security import hash_password
+
+# ECV is foundational — every customer org must subscribe to it. The
+# backend enforces this regardless of what the client sends, so a
+# buggy UI can't provision an org without ECV.
+_REQUIRED_APP = "ecv"
 
 router = APIRouter(prefix="/api/logikality", tags=["logikality"])
 
@@ -62,34 +67,31 @@ async def list_accounts(
     session: Annotated[AsyncSession, Depends(get_session)],
     _admin: Annotated[User, Depends(require_platform_admin)],
 ) -> list[AccountRow]:
-    # LEFT JOIN so orgs with no users yet still return with user_count = 0.
-    # Order by created_at DESC so the most recently added orgs surface first.
-    stmt = (
-        select(
-            Org.id,
-            Org.name,
-            Org.slug,
-            Org.type,
-            Org.created_at,
-            func.count(User.id).label("user_count"),
-        )
-        .select_from(Org)
-        .outerjoin(User, User.org_id == Org.id)
-        .group_by(Org.id)
-        .order_by(Org.created_at.desc())
+    # Counts come from two separate aggregate queries rather than a
+    # single JOIN — joining users * subscriptions would multiply rows
+    # and need DISTINCT tricks. Two small queries keyed by org_id is
+    # clearer and fine at customer-count scale.
+    users_stmt = select(User.org_id, func.count(User.id)).group_by(User.org_id)
+    subs_stmt = select(AppSubscription.org_id, func.count(AppSubscription.id)).group_by(
+        AppSubscription.org_id
     )
-    result = await session.execute(stmt)
+    orgs_stmt = select(Org).order_by(Org.created_at.desc())
+
+    users_by_org = {row[0]: row[1] for row in (await session.execute(users_stmt)).all()}
+    subs_by_org = {row[0]: row[1] for row in (await session.execute(subs_stmt)).all()}
+    orgs = (await session.execute(orgs_stmt)).scalars().all()
+
     return [
         AccountRow(
-            id=str(row.id),
-            name=row.name,
-            slug=row.slug,
-            type=row.type,
-            created_at=row.created_at,
-            user_count=row.user_count,
-            subscription_count=0,  # US-2.5 will wire real subscription counts
+            id=str(org.id),
+            name=org.name,
+            slug=org.slug,
+            type=org.type,
+            created_at=org.created_at,
+            user_count=users_by_org.get(org.id, 0),
+            subscription_count=subs_by_org.get(org.id, 0),
         )
-        for row in result.all()
+        for org in orgs
     ]
 
 
@@ -115,6 +117,11 @@ class CreateAccountRequest(BaseModel):
     primary_admin_full_name: str = Field(min_length=1, max_length=120)
     primary_admin_email: EmailStr
     initial_password: str | None = Field(default=None, min_length=6, max_length=128)
+    # Which micro-apps the new org should be subscribed to. ECV is added
+    # server-side regardless — leaving this unset gives an ECV-only org,
+    # which matches the conservative default for the Mortgage BPO type.
+    # Unknown ids are rejected with a 400.
+    subscribed_apps: list[str] = Field(default_factory=list)
 
 
 class CreateAccountResponse(BaseModel):
@@ -159,6 +166,16 @@ async def create_account(
             ),
         )
 
+    # Normalize the subscribed-apps list: dedupe, always include ECV, and
+    # reject unknown ids with a precise 400 before we start inserting.
+    unknown = [a for a in payload.subscribed_apps if a not in APP_IDS]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown app id(s): {', '.join(sorted(set(unknown)))}",
+        )
+    subscribed_apps = sorted({*payload.subscribed_apps, _REQUIRED_APP})
+
     # Pre-check for collisions so we can return field-specific 409s instead
     # of a generic IntegrityError. The IntegrityError branch below still
     # handles the race where two admins create in parallel.
@@ -202,6 +219,12 @@ async def create_account(
     )
     session.add(admin_user)
 
+    # Insert subscription rows in the same transaction so an org is never
+    # left partially provisioned. `enabled` defaults to true server-side
+    # (customer admin can toggle off in US-2.6).
+    for app_id in subscribed_apps:
+        session.add(AppSubscription(org_id=org.id, app_id=app_id))
+
     try:
         await session.commit()
     except IntegrityError as exc:
@@ -220,7 +243,7 @@ async def create_account(
             type=org.type,
             created_at=org.created_at,
             user_count=1,  # just inserted the primary admin
-            subscription_count=0,
+            subscription_count=len(subscribed_apps),
         ),
         primary_admin_email=admin_user.email,
         temp_password=temp_password,

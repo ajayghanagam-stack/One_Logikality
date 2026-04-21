@@ -30,6 +30,17 @@ PLATFORM_ADMIN_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 ACME_ORG_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a0")
 ACME_PRIMARY_ADMIN_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
 
+# Acme is the demo "Mortgage Lender" — the lender defaults in the create
+# form subscribe to every app, so the seeded view matches what a freshly
+# created lender would look like.
+ACME_SUBSCRIBED_APPS: tuple[str, ...] = (
+    "ecv",
+    "title-search",
+    "title-exam",
+    "compliance",
+    "income-calc",
+)
+
 
 @dataclass(frozen=True)
 class _UserSpec:
@@ -73,12 +84,17 @@ async def seed() -> None:
         )
         platform_created = await _upsert_user(session, PLATFORM_ADMIN)
         acme_admin_created = await _upsert_user(session, ACME_PRIMARY_ADMIN)
+        subs_added = await _ensure_subscriptions(
+            session, org_id=ACME_ORG_ID, app_ids=ACME_SUBSCRIBED_APPS
+        )
         await session.commit()
 
     print("Seed complete:")
     print(f"  Acme Mortgage Holdings     {'created' if org_created else '(existing)'}")
     print(f"  admin@logikality.com       {'created' if platform_created else '(existing)'}")
     print(f"  admin@acmemortgage.com     {'created' if acme_admin_created else '(existing)'}")
+    subs_existing = len(ACME_SUBSCRIBED_APPS) - subs_added
+    print(f"  Acme subscriptions         {subs_added} added, {subs_existing} existing")
 
 
 async def _upsert_org(session, *, id: uuid.UUID, name: str, slug: str, type: str) -> bool:
@@ -91,6 +107,24 @@ async def _upsert_org(session, *, id: uuid.UUID, name: str, slug: str, type: str
         {"id": id, "name": name, "slug": slug, "type": type},
     )
     return result.first() is not None
+
+
+async def _ensure_subscriptions(session, *, org_id: uuid.UUID, app_ids: tuple[str, ...]) -> int:
+    """Add any missing subscriptions for this org idempotently. Returns
+    the number of rows actually inserted (vs. already present)."""
+    added = 0
+    for app_id in app_ids:
+        result = await session.execute(
+            text(
+                "INSERT INTO app_subscriptions (org_id, app_id) "
+                "VALUES (:org_id, :app_id) "
+                "ON CONFLICT (org_id, app_id) DO NOTHING RETURNING id"
+            ),
+            {"org_id": org_id, "app_id": app_id},
+        )
+        if result.first() is not None:
+            added += 1
+    return added
 
 
 async def _upsert_user(session, spec: _UserSpec) -> bool:

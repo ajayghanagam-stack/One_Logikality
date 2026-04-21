@@ -130,7 +130,8 @@ async def test_create_account_succeeds_and_new_admin_can_log_in(
     assert account["name"] == payload["name"]
     assert account["type"] == "Mortgage Lender"
     assert account["user_count"] == 1
-    assert account["subscription_count"] == 0
+    # ECV is auto-subscribed server-side even when the payload omits apps.
+    assert account["subscription_count"] == 1
     assert body["primary_admin_email"] == payload["primary_admin_email"]
     assert isinstance(body["temp_password"], str) and len(body["temp_password"]) >= 8
 
@@ -261,3 +262,75 @@ async def test_create_account_rejects_short_initial_password(client: AsyncClient
     )
     # Pydantic `min_length=6` kicks in before the handler body runs.
     assert resp.status_code == 422
+
+
+# --- App subscriptions on create (US-1.6 + US-2.5 pulled forward) ------
+
+
+async def test_create_account_defaults_to_ecv_only_when_no_apps_supplied(
+    client: AsyncClient, seeded
+) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=_create_payload(uuid.uuid4().hex[:8]),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    account_id = body["account"]["id"]
+    try:
+        # ECV is always added server-side even when the client sends nothing.
+        assert body["account"]["subscription_count"] == 1
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_create_account_persists_subscribed_apps_and_always_includes_ecv(
+    client: AsyncClient, seeded
+) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    # Deliberately omit ECV from the client list — the server must add it.
+    payload = {
+        **_create_payload(uuid.uuid4().hex[:8]),
+        "subscribed_apps": ["title-search", "compliance"],
+    }
+    create_resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=payload,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    account_id = create_resp.json()["account"]["id"]
+    try:
+        # title-search + compliance + ecv = 3.
+        assert create_resp.json()["account"]["subscription_count"] == 3
+
+        # Round-trip through the list endpoint — the new org's row should
+        # reflect the same count, proving the rows persisted.
+        list_resp = await client.get(
+            "/api/logikality/accounts",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert list_resp.status_code == 200
+        match = next(r for r in list_resp.json() if r["id"] == account_id)
+        assert match["subscription_count"] == 3
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_create_account_rejects_unknown_app_id(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            **_create_payload(uuid.uuid4().hex[:8]),
+            "subscribed_apps": ["ecv", "nonsense"],
+        },
+    )
+    assert resp.status_code == 400
+    assert "nonsense" in resp.json()["detail"]
