@@ -251,6 +251,172 @@ async def create_account(
     )
 
 
+class AccountDetail(BaseModel):
+    """Single-account payload for the Manage page (US-1.7).
+
+    Extends `AccountRow` with the primary admin (name + email) and the
+    list of subscribed app ids. Kept as a distinct model so the list
+    endpoint's response shape doesn't grow a big nullable admin block
+    that every row would carry even when unused.
+    """
+
+    id: str
+    name: str
+    slug: str
+    type: str
+    created_at: datetime
+    user_count: int
+    subscription_count: int
+    primary_admin_name: str | None
+    primary_admin_email: str | None
+    subscribed_apps: list[str]
+
+
+@router.get("/accounts/{org_id}", response_model=AccountDetail)
+async def get_account(
+    org_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_platform_admin)],
+) -> AccountDetail:
+    org = (await session.execute(select(Org).where(Org.id == org_id))).scalar_one_or_none()
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="organization not found",
+        )
+
+    users_stmt = select(User).where(User.org_id == org_id)
+    users = (await session.execute(users_stmt)).scalars().all()
+    primary = next((u for u in users if u.is_primary_admin), None)
+
+    subs_stmt = select(AppSubscription.app_id).where(AppSubscription.org_id == org_id)
+    subs = [row[0] for row in (await session.execute(subs_stmt)).all()]
+
+    return AccountDetail(
+        id=str(org.id),
+        name=org.name,
+        slug=org.slug,
+        type=org.type,
+        created_at=org.created_at,
+        user_count=len(users),
+        subscription_count=len(subs),
+        primary_admin_name=primary.full_name if primary else None,
+        primary_admin_email=primary.email if primary else None,
+        subscribed_apps=sorted(subs),
+    )
+
+
+class ResetAdminPasswordRequest(BaseModel):
+    """Optional platform-admin-supplied password (demo affordance).
+
+    Mirrors the create-account flow: if `new_password` is omitted the
+    server generates a 12-char one-time password. Either way the
+    plaintext is returned once and never retrievable again — the UI
+    shows a copy-to-clipboard card.
+    """
+
+    new_password: str | None = Field(default=None, min_length=6, max_length=128)
+
+
+class ResetAdminPasswordResponse(BaseModel):
+    primary_admin_email: str
+    temp_password: str
+
+
+@router.post(
+    "/accounts/{org_id}/reset-admin-password",
+    response_model=ResetAdminPasswordResponse,
+)
+async def reset_admin_password(
+    org_id: uuid.UUID,
+    payload: ResetAdminPasswordRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_platform_admin)],
+) -> ResetAdminPasswordResponse:
+    # Find the org's primary admin. Every org has exactly one at create
+    # time; if somehow zero we return 409 rather than silently no-op'ing.
+    primary = (
+        await session.execute(
+            select(User).where(User.org_id == org_id, User.is_primary_admin.is_(True))
+        )
+    ).scalar_one_or_none()
+    if primary is None:
+        # 404 covers both "unknown org" and "org with no primary admin".
+        # The client doesn't need to distinguish — either way, can't reset.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="primary admin not found for this organization",
+        )
+
+    temp_password = payload.new_password or secrets.token_urlsafe(9)
+    primary.password_hash = hash_password(temp_password)
+    await session.commit()
+
+    return ResetAdminPasswordResponse(
+        primary_admin_email=primary.email,
+        temp_password=temp_password,
+    )
+
+
+class UpdateSubscriptionsRequest(BaseModel):
+    """Replace-the-whole-set semantics: whatever arrives is the new
+    subscription list, with ECV forced in and unknowns rejected.
+
+    The `enabled` toggle per-subscription is a customer-admin concern
+    (US-2.6) and lives on a separate endpoint — this one only controls
+    which apps exist as subscriptions at all.
+    """
+
+    app_ids: list[str] = Field(default_factory=list)
+
+
+@router.put(
+    "/accounts/{org_id}/subscriptions",
+    response_model=AccountDetail,
+)
+async def update_subscriptions(
+    org_id: uuid.UUID,
+    payload: UpdateSubscriptionsRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_platform_admin)],
+) -> AccountDetail:
+    org = (await session.execute(select(Org).where(Org.id == org_id))).scalar_one_or_none()
+    if org is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="organization not found",
+        )
+
+    unknown = [a for a in payload.app_ids if a not in APP_IDS]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown app id(s): {', '.join(sorted(set(unknown)))}",
+        )
+    # Always include ECV regardless of what the client sends — mirrors
+    # the create-account invariant.
+    target = set(payload.app_ids) | {_REQUIRED_APP}
+
+    existing_stmt = select(AppSubscription).where(AppSubscription.org_id == org_id)
+    existing = (await session.execute(existing_stmt)).scalars().all()
+    existing_ids = {s.app_id for s in existing}
+
+    # Diff-based update — cheaper than delete-all + re-insert, and keeps
+    # the `created_at` timestamp + `enabled` toggle intact on apps that
+    # stay subscribed across a PUT.
+    for sub in existing:
+        if sub.app_id not in target:
+            await session.delete(sub)
+    for app_id in target - existing_ids:
+        session.add(AppSubscription(org_id=org_id, app_id=app_id))
+
+    await session.commit()
+
+    # Re-emit the full detail payload so the client can replace its
+    # local state in one go without another GET.
+    return await get_account(org_id, session, _admin)
+
+
 @router.delete(
     "/accounts/{org_id}",
     status_code=status.HTTP_204_NO_CONTENT,

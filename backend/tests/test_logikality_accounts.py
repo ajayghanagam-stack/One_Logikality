@@ -411,3 +411,237 @@ async def test_delete_account_cascades_users_and_subscriptions(client: AsyncClie
         },
     )
     assert login.status_code == 401
+
+
+# --- US-1.7: GET /api/logikality/accounts/{id} -------------------------
+
+
+async def test_get_account_requires_auth(client: AsyncClient, seeded) -> None:
+    resp = await client.get(f"/api/logikality/accounts/{seeded['org_id']}")
+    assert resp.status_code == 401
+
+
+async def test_get_account_rejects_customer_admin(client: AsyncClient, seeded) -> None:
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.get(
+        f"/api/logikality/accounts/{seeded['org_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_get_account_returns_admin_and_subscriptions(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    # Create a fresh org so we know exactly what to assert against —
+    # the shared seed fixture's Acme may accumulate state across tests.
+    suffix = uuid.uuid4().hex[:8]
+    create = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={**_create_payload(suffix), "subscribed_apps": ["title-search"]},
+    )
+    account_id = create.json()["account"]["id"]
+    try:
+        resp = await client.get(
+            f"/api/logikality/accounts/{account_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["id"] == account_id
+        assert body["primary_admin_email"] == f"wendy-{suffix}@widget.example.com"
+        assert body["primary_admin_name"] == "Wendy Widget"
+        # title-search + ECV (auto-added).
+        assert sorted(body["subscribed_apps"]) == ["ecv", "title-search"]
+        assert body["user_count"] == 1
+        assert body["subscription_count"] == 2
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_get_account_unknown_id_returns_404(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.get(
+        f"/api/logikality/accounts/{uuid.uuid4()}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
+# --- US-1.7: POST /api/logikality/accounts/{id}/reset-admin-password ---
+
+
+async def test_reset_admin_password_requires_auth(client: AsyncClient, seeded) -> None:
+    resp = await client.post(
+        f"/api/logikality/accounts/{seeded['org_id']}/reset-admin-password",
+        json={},
+    )
+    assert resp.status_code == 401
+
+
+async def test_reset_admin_password_rejects_customer_admin(client: AsyncClient, seeded) -> None:
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        f"/api/logikality/accounts/{seeded['org_id']}/reset-admin-password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+    )
+    assert resp.status_code == 403
+
+
+async def test_reset_admin_password_generates_and_login_works(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    suffix = uuid.uuid4().hex[:8]
+    create = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=_create_payload(suffix),
+    )
+    account = create.json()
+    account_id = account["account"]["id"]
+    old_password = account["temp_password"]
+    try:
+        resp = await client.post(
+            f"/api/logikality/accounts/{account_id}/reset-admin-password",
+            headers={"Authorization": f"Bearer {token}"},
+            json={},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        new_password = body["temp_password"]
+        assert body["primary_admin_email"] == f"wendy-{suffix}@widget.example.com"
+        assert isinstance(new_password, str) and len(new_password) >= 8
+        assert new_password != old_password
+
+        # Old password invalid; new password works.
+        bad = await client.post(
+            "/api/auth/login",
+            json={"email": body["primary_admin_email"], "password": old_password},
+        )
+        assert bad.status_code == 401
+        good = await client.post(
+            "/api/auth/login",
+            json={"email": body["primary_admin_email"], "password": new_password},
+        )
+        assert good.status_code == 200
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_reset_admin_password_accepts_admin_supplied(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    suffix = uuid.uuid4().hex[:8]
+    create = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json=_create_payload(suffix),
+    )
+    account_id = create.json()["account"]["id"]
+    chosen = "reset-pass-99"
+    try:
+        resp = await client.post(
+            f"/api/logikality/accounts/{account_id}/reset-admin-password",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"new_password": chosen},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["temp_password"] == chosen
+
+        login = await client.post(
+            "/api/auth/login",
+            json={
+                "email": f"wendy-{suffix}@widget.example.com",
+                "password": chosen,
+            },
+        )
+        assert login.status_code == 200
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_reset_admin_password_rejects_short(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        f"/api/logikality/accounts/{seeded['org_id']}/reset-admin-password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"new_password": "short"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_reset_admin_password_unknown_org_returns_404(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.post(
+        f"/api/logikality/accounts/{uuid.uuid4()}/reset-admin-password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={},
+    )
+    assert resp.status_code == 404
+
+
+# --- US-1.7: PUT /api/logikality/accounts/{id}/subscriptions -----------
+
+
+async def test_update_subscriptions_replaces_set_and_keeps_ecv(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    suffix = uuid.uuid4().hex[:8]
+    create = await client.post(
+        "/api/logikality/accounts",
+        headers={"Authorization": f"Bearer {token}"},
+        json={**_create_payload(suffix), "subscribed_apps": ["title-search", "compliance"]},
+    )
+    account_id = create.json()["account"]["id"]
+    try:
+        # Swap to a different set — drops title-search + compliance, adds
+        # income-calc. ECV must persist regardless of what we send.
+        resp = await client.put(
+            f"/api/logikality/accounts/{account_id}/subscriptions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"app_ids": ["income-calc"]},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert sorted(body["subscribed_apps"]) == ["ecv", "income-calc"]
+        assert body["subscription_count"] == 2
+
+        # Empty list still leaves ECV behind.
+        resp2 = await client.put(
+            f"/api/logikality/accounts/{account_id}/subscriptions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"app_ids": []},
+        )
+        assert resp2.json()["subscribed_apps"] == ["ecv"]
+    finally:
+        await _delete_org(account_id)
+
+
+async def test_update_subscriptions_rejects_unknown_app_id(client: AsyncClient, seeded) -> None:
+    email, password = seeded["platform_admin"]
+    token = await _login(client, email, password)
+    resp = await client.put(
+        f"/api/logikality/accounts/{seeded['org_id']}/subscriptions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"app_ids": ["nonsense"]},
+    )
+    assert resp.status_code == 400
+    assert "nonsense" in resp.json()["detail"]
+
+
+async def test_update_subscriptions_rejects_customer_admin(client: AsyncClient, seeded) -> None:
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.put(
+        f"/api/logikality/accounts/{seeded['org_id']}/subscriptions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"app_ids": ["ecv"]},
+    )
+    assert resp.status_code == 403
