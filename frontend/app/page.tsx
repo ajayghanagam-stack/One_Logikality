@@ -2,9 +2,10 @@
 
 /**
  * Dual-portal login selector (US-1.1). Visitors pick Customer or Platform
- * Admin; each button routes to the corresponding login page. If the visitor
- * is already signed in (token + user in localStorage), we send them straight
- * to their portal without forcing a re-login.
+ * Admin; each button routes to the portal's landing URL, which *is* the
+ * login surface when unauthenticated. If the visitor is already signed in
+ * (token + user in localStorage), we send them straight to their portal
+ * without forcing a re-login.
  */
 
 import Image from "next/image";
@@ -21,7 +22,11 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!hydrated || !user) return;
-    router.replace(user.role === "platform_admin" ? "/platform-admin/accounts" : "/customer");
+    if (user.role === "platform_admin") {
+      router.replace("/logikality/accounts");
+    } else if (user.org_slug) {
+      router.replace(`/${user.org_slug}`);
+    }
   }, [hydrated, user, router]);
 
   return (
@@ -77,13 +82,17 @@ export default function HomePage() {
           width: "min(560px, 90vw)",
         }}
       >
+        {/* Customer card points at the demo-seeded tenant (`acme`). In
+            production, visitors will reach `/{orgSlug}` directly from
+            their invite email or saved URL — this selector mostly exists
+            for the demo. The tenant URL itself is the login surface. */}
         <PortalCard
-          href="/customer/login"
+          href="/acme"
           title="Customer"
           description="Mortgage lenders, servicers, title agencies, and BPOs."
         />
         <PortalCard
-          href="/platform-admin/login"
+          href="/logikality"
           title="Platform admin"
           description="Logikality staff: manage customer accounts and subscriptions."
           tone="dark"

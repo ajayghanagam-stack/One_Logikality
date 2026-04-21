@@ -7,6 +7,11 @@ const API_ORIGIN = process.env.API_ORIGIN ?? "http://localhost:8001";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // Hide the in-page "Compiling / Rendering" dev indicator overlay — it's
+  // distracting during demos. Next.js HMR still works; only the badge
+  // disappears. Set NEXT_PUBLIC_SHOW_DEV_INDICATORS=1 to re-enable if we
+  // ever need to debug build activity.
+  devIndicators: false,
   async rewrites() {
     return [
       {

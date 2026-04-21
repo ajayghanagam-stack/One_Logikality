@@ -16,7 +16,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { colors, typography } from "@/lib/brand";
-import { ApiError, useAuth, type Role } from "@/lib/auth";
+import { ApiError, useAuth, type Role, type User } from "@/lib/auth";
 
 type Props = {
   /** Card heading — typically "Welcome back". */
@@ -29,8 +29,9 @@ type Props = {
    * role isn't in this set, we reject rather than letting a customer into
    * the platform-admin portal or vice versa. */
   allowedRoles: Role[];
-  /** Destination on successful login (keyed off returned role). */
-  destinationFor: (role: Role) => string;
+  /** Destination on successful login. Receives the full signed-in user so
+   * customer pages can route to `/{user.org_slug}`. */
+  destinationFor: (user: User) => string;
 };
 
 export function LoginForm({
@@ -57,7 +58,7 @@ export function LoginForm({
         setError("This sign-in is not valid for that account type.");
         return;
       }
-      router.replace(destinationFor(user.role));
+      router.replace(destinationFor(user));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setError(err.detail ?? "Invalid email or password.");
@@ -125,15 +126,32 @@ export function LoginForm({
         <button
           type="submit"
           disabled={submitting}
+          className="ol-cta"
           style={{
             ...buttonStyle,
             cursor: submitting ? "not-allowed" : "pointer",
-            opacity: submitting ? 0.75 : 1,
           }}
         >
           {submitting ? "Signing in…" : submitLabel}
         </button>
       </form>
+
+      {/* TI Hub btn-cta parity: amber gradient + hover lift. Hover/disabled
+          rules can't live in inline styles, so they ride along here. */}
+      <style>{`
+        .ol-cta {
+          background: linear-gradient(135deg, oklch(0.750 0.170 65) 0%, oklch(0.680 0.190 55) 100%);
+          box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+          transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+        }
+        .ol-cta:hover:not(:disabled) {
+          background: linear-gradient(135deg, oklch(0.720 0.175 62) 0%, oklch(0.650 0.200 50) 100%);
+          transform: translateY(-1px);
+          box-shadow: 0 6px 20px oklch(0.750 0.170 65 / 0.30);
+        }
+        .ol-cta:active:not(:disabled) { transform: translateY(0); }
+        .ol-cta:disabled { opacity: 0.5; box-shadow: none; transform: none; }
+      `}</style>
     </div>
   );
 }
@@ -222,7 +240,7 @@ const errorStyle: React.CSSProperties = {
 };
 
 const buttonStyle: React.CSSProperties = {
-  backgroundColor: colors.teal,
+  // background is set by the .ol-cta class (TI Hub amber gradient).
   color: colors.white,
   border: "none",
   borderRadius: 8,

@@ -27,6 +27,9 @@ export type User = {
   full_name: string;
   role: Role;
   org_id: string | null;
+  /** URL-friendly org identifier. Null for platform_admin users (who live
+   * under the reserved `/logikality/*` route). */
+  org_slug: string | null;
   is_primary_admin: boolean;
 };
 

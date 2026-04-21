@@ -38,6 +38,37 @@ export const typography = {
 } as const;
 
 /**
+ * Secondary chrome palette — warm neutrals + amber accent used by layout
+ * surfaces (sidebars, page backgrounds, nav active states, callouts).
+ *
+ * Derived from the Title Intelligence Hub visual system (same values as the
+ * one-logikality-demo `BRAND` export) so the two Logikality products read
+ * as one family per CLAUDE.md. The primary palette above remains the
+ * PDF-authoritative brand marks; these are strictly surface tokens.
+ */
+export const chrome = {
+  // Surfaces
+  bg: "#FAFAF8",          // page background
+  card: "#FEFEFE",        // elevated card surface
+  muted: "#F5F5F2",       // subtle fill
+
+  // Borders
+  border: "#E8E4DC",
+  borderHover: "#D1CBBE",
+
+  // Warm text — darker + more neutral than pure brand charcoal
+  fg: "#1A1714",
+  charcoal: "#2B2622",
+  mutedFg: "#7A7468",
+
+  // Amber accent for active nav, warnings, callouts
+  amber: "#D4930F",
+  amberDark: "#C07B10",
+  amberLight: "#F5E6C8",
+  amberBg: "#FDF6E9",
+} as const;
+
+/**
  * Approved Logikality logo assets under /public/.
  * Per CLAUDE.md: never recreate, re-trace, or inline-SVG the mark — reference
  * these files only.

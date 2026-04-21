@@ -52,7 +52,7 @@ export function AuthBrandPanel({ children }: Props) {
               width={240}
               height={65}
               priority
-              style={{ width: "auto", height: "auto", maxWidth: 240 }}
+              style={{ width: 240, height: "auto" }}
             />
           </div>
 
@@ -76,7 +76,7 @@ export function AuthBrandPanel({ children }: Props) {
               width={160}
               height={44}
               priority
-              style={{ width: "auto", height: "auto", maxWidth: 160 }}
+              style={{ width: 160, height: "auto" }}
             />
           </div>
 
