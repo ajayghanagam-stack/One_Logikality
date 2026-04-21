@@ -110,3 +110,18 @@ async def require_customer_admin(
             detail="customer admin only",
         )
     return user
+
+
+async def require_customer_role(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Either customer role — admin or user. Use for tenant-plane actions
+    both roles perform (uploading packets, viewing ECV results). Keeps
+    platform admins out: they shouldn't be silently dropping packets
+    into customer orgs without a deliberate impersonation flow."""
+    if user.role not in ("customer_admin", "customer_user"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="customer role required",
+        )
+    return user

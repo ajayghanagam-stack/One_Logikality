@@ -13,7 +13,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -201,3 +209,100 @@ class AppRuleOverride(Base):
             name="app_rule_overrides_org_program_rule_unique",
         ),
     )
+
+
+# Status values mirror migration 0006's CHECK constraint. Packets start
+# as `uploaded` (bytes persisted, nothing run yet); the ECV worker will
+# flip through `processing` → `completed` / `failed` in Phase 3.
+PACKET_STATUSES: tuple[str, ...] = (
+    "uploaded",
+    "processing",
+    "completed",
+    "failed",
+)
+
+
+class Packet(Base):
+    """A document packet submitted by a customer user for ECV processing.
+
+    The declared program id is captured at upload time (US-3.2). It stays
+    on the row so rule resolution at processing time is reproducible even
+    if the org's config changes between upload and analysis; that same
+    program is what US-3.11's confirmation analysis will validate against.
+    """
+
+    __tablename__ = "packets"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    declared_program_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, server_default="uploaded")
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    files: Mapped[list[PacketFile]] = relationship(
+        back_populates="packet",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in PACKET_STATUSES) + ")",
+            name="packets_status_check",
+        ),
+    )
+
+
+class PacketFile(Base):
+    """One uploaded document inside a `Packet`.
+
+    `storage_key` is what the storage adapter reads/writes — bytes live
+    there, this row just carries metadata the UI needs (filename, size,
+    content-type) plus the key the pipeline will read from.
+    """
+
+    __tablename__ = "packet_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    packet_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("packets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Denormalized so RLS can scope without joining packets.
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    packet: Mapped[Packet] = relationship(back_populates="files")
