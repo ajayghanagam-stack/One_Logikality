@@ -446,7 +446,7 @@ function Dashboard({
           sectionId: sec.section_number,
         })),
       )
-      .filter((it) => it.in_scope);
+      .filter((it) => it.in_scope && it.app_ids.includes("ecv"));
     return flat.filter(
       (i) => severity(i.confidence, summary.critical_threshold, summary.confidence_threshold) !== "pass",
     );
