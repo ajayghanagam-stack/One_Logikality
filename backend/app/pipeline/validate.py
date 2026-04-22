@@ -26,6 +26,7 @@ as the classify/extract stages; server-internal orchestration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any, NotRequired, TypedDict
@@ -38,6 +39,12 @@ from app.deps import get_anthropic_adapter
 from app.models import EcvDocument, EcvExtraction, EcvLineItem, EcvSection, Packet
 
 log = logging.getLogger(__name__)
+
+# Max concurrent Claude validate calls in flight per packet. With 13
+# sections per packet, 4-wide concurrency cuts the stage from ~13*latency
+# to ~4*latency. Tests stub `validate_packet` so this is irrelevant under
+# test.
+_VALIDATE_CONCURRENCY = 4
 
 
 class _SectionDef(TypedDict):
@@ -298,25 +305,35 @@ async def validate_packet(packet_id: uuid.UUID) -> None:
     context = _format_context(extractions=list(extractions), documents=list(documents))
     adapter = get_anthropic_adapter()
 
+    # Fan out the 13 Claude section calls concurrently; the row-building
+    # that follows is pure-Python and stays sequential to preserve the
+    # ordering the post-flush section_id binding relies on.
+    sem = asyncio.Semaphore(_VALIDATE_CONCURRENCY)
+
+    async def _run(section_def: _SectionDef) -> dict[str, dict[str, Any]]:
+        checks = _CHECK_DEFS[section_def["number"]]
+        async with sem:
+            try:
+                return await _validate_section(
+                    adapter=adapter,
+                    section_name=section_def["name"],
+                    checks=checks,
+                    context=context,
+                )
+            except Exception:
+                log.exception(
+                    "validate: section %s Claude call failed; marking section zero",
+                    section_def["number"],
+                )
+                return {c["id"]: {"result": "validation failed", "confidence": 0} for c in checks}
+
+    graded_by_section = await asyncio.gather(*(_run(sd) for sd in _SECTION_DEFS))
+
     section_rows: list[EcvSection] = []
     line_item_rows: list[EcvLineItem] = []
 
-    for section_def in _SECTION_DEFS:
+    for section_def, graded in zip(_SECTION_DEFS, graded_by_section, strict=True):
         checks = _CHECK_DEFS[section_def["number"]]
-        try:
-            graded = await _validate_section(
-                adapter=adapter,
-                section_name=section_def["name"],
-                checks=checks,
-                context=context,
-            )
-        except Exception:
-            log.exception(
-                "validate: section %s Claude call failed; marking section zero",
-                section_def["number"],
-            )
-            graded = {c["id"]: {"result": "validation failed", "confidence": 0} for c in checks}
-
         section_confidences: list[int] = []
         section = EcvSection(
             packet_id=packet_id,

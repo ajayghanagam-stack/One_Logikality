@@ -15,6 +15,8 @@ Claude calls become 13 lookups and the test stays hermetic + fast.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -26,7 +28,12 @@ from sqlalchemy import select, text
 from app.db import SessionLocal
 from app.models import EcvLineItem, EcvSection
 from app.pipeline import validate as validate_mod
-from app.pipeline.validate import _CHECK_DEFS, _SECTION_DEFS, validate_packet
+from app.pipeline.validate import (
+    _CHECK_DEFS,
+    _SECTION_DEFS,
+    _VALIDATE_CONCURRENCY,
+    validate_packet,
+)
 
 
 class _FakeAdapter:
@@ -266,3 +273,50 @@ async def test_validate_no_op_for_unknown_packet(
     # Should not raise; should not make any Claude calls either.
     await validate_packet(uuid.uuid4())
     assert adapter.calls == []
+
+
+# --- concurrency ------------------------------------------------------
+
+
+async def test_validate_runs_sections_concurrently(
+    packet_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 13 Claude section calls must fan out under the semaphore, not
+    serialize.
+
+    Regression guard: a naive refactor that drops `asyncio.gather` would
+    still pass every other test in this file (they all use an instant
+    fake adapter). This test makes each call sleep 0.2s so serialization
+    would take ~2.6s; parallel execution at concurrency=4 should land
+    near 0.2s * ceil(13 / 4) ≈ 0.8s. We allow generous headroom on both
+    sides to keep the test stable on slow CI.
+    """
+    sleep_s = 0.2
+    fake = _FakeAdapter(_full_pass_responses())
+    original_complete = fake.complete
+
+    async def _slow_complete(**kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(sleep_s)
+        return await original_complete(**kwargs)
+
+    fake.complete = _slow_complete  # type: ignore[method-assign]
+    monkeypatch.setattr(validate_mod, "get_anthropic_adapter", lambda: fake)
+
+    t0 = time.perf_counter()
+    await validate_packet(packet_id)
+    elapsed = time.perf_counter() - t0
+
+    import math
+
+    expected_batches = math.ceil(len(_SECTION_DEFS) / _VALIDATE_CONCURRENCY)
+    serial_floor = sleep_s * len(_SECTION_DEFS)
+    parallel_ceiling = sleep_s * expected_batches + 1.5  # 1.5s for DB writes
+
+    assert elapsed < serial_floor * 0.6, (
+        f"validate took {elapsed:.2f}s; serial would be ~{serial_floor:.2f}s — "
+        "sections are not running in parallel"
+    )
+    assert elapsed < parallel_ceiling, (
+        f"validate took {elapsed:.2f}s; expected under ~{parallel_ceiling:.2f}s "
+        f"for concurrency={_VALIDATE_CONCURRENCY}"
+    )

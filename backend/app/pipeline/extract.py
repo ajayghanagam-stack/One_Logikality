@@ -23,6 +23,7 @@ tenant-scoped request.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any, TypedDict
@@ -54,6 +55,13 @@ class ExtractedField(TypedDict, total=False):
 # flattening. Raising this further rarely improves extraction quality
 # for mortgage forms, which are mostly label-value pairs at the top.
 _MAX_CHARS_PER_PAGE = 4000
+
+# Max concurrent Gemini Pro extraction calls in flight per packet. Each
+# call is the largest single cost in the pipeline (one call per document,
+# ~15-20 docs for a typical packet), so parallelism here delivers the
+# biggest wall-clock win. Semaphore keeps us under Vertex per-minute
+# quota. Tests stub `extract_packet` so this value is irrelevant under test.
+_EXTRACT_CONCURRENCY = 5
 
 
 _EXTRACT_SYSTEM = (
@@ -157,7 +165,12 @@ async def extract_packet(packet_id: uuid.UUID) -> None:
     pages_by_number: dict[int, str] = {p["page_number"]: p["text"] for p in pages}
 
     adapter = get_vertex_adapter()
-    all_rows: list[EcvExtraction] = []
+
+    # Build the per-doc job list sequentially (cheap: range parsing +
+    # in-memory page slicing), then fan out the LLM calls concurrently.
+    # Each job captures (doc, first, last, doc_pages) so results can be
+    # bound back to the right doc after gather.
+    doc_jobs: list[tuple[EcvDocument, int, int, list[tuple[int, str]]]] = []
     for doc in docs:
         if doc.status != "found":
             continue
@@ -182,18 +195,36 @@ async def extract_packet(packet_id: uuid.UUID) -> None:
             # AI lands later; for now skip rather than ask Gemini to
             # hallucinate fields from nothing.
             continue
+        doc_jobs.append((doc, first, last, doc_pages))
 
-        try:
-            extractions = await _extract_document(
-                adapter=adapter,
-                mismo_type=doc.mismo_type,
-                doc_name=doc.name,
-                pages=doc_pages,
-            )
-        except Exception:
-            log.exception("extract: Gemini call failed for doc %s (%s)", doc.id, doc.mismo_type)
-            continue
+    sem = asyncio.Semaphore(_EXTRACT_CONCURRENCY)
 
+    async def _run(
+        doc: EcvDocument,
+        pages_payload: list[tuple[int, str]],
+    ) -> list[ExtractedField]:
+        async with sem:
+            try:
+                return await _extract_document(
+                    adapter=adapter,
+                    mismo_type=doc.mismo_type,
+                    doc_name=doc.name,
+                    pages=pages_payload,
+                )
+            except Exception:
+                log.exception(
+                    "extract: Gemini call failed for doc %s (%s)",
+                    doc.id,
+                    doc.mismo_type,
+                )
+                return []
+
+    doc_results = await asyncio.gather(
+        *(_run(doc, pages_payload) for (doc, _, _, pages_payload) in doc_jobs)
+    )
+
+    all_rows: list[EcvExtraction] = []
+    for (doc, first, last, _), extractions in zip(doc_jobs, doc_results, strict=True):
         for e in extractions:
             # Belt-and-suspenders — the response schema already bounds
             # confidence, but drop malformed rows rather than trip the

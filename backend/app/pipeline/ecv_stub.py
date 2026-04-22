@@ -105,10 +105,12 @@ PIPELINE_STAGES: tuple[str, ...] = (
     "route",
 )
 
-# Per-stage wall-clock delay. 0.8s gives the UI enough breathing room to
-# highlight each stage icon without making the upload feel sluggish.
-# Tests monkeypatch this to ~0.01s so polling terminates fast.
-STAGE_DELAY_SECONDS: float = 0.8
+# Per-stage wall-clock delay. Kept small so the pipeline isn't artificially
+# slowed by UI animation fluff — the real work (classify/extract/validate
+# LLM calls) dominates total time. Tests monkeypatch this to ~0.01s for
+# fast polling; 0.1s in prod gives the PipelineProgress component a visible
+# tick between stages without adding meaningful latency.
+STAGE_DELAY_SECONDS: float = 0.1
 
 
 def _parse_date(value: str | None) -> date | None:

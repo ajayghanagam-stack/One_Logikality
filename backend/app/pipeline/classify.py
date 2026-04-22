@@ -214,6 +214,12 @@ _MAX_CHARS_PER_PAGE = 400
 # Max pages per Gemini call. Roughly bounds latency + cost per batch.
 _PAGES_PER_BATCH = 50
 
+# Max concurrent Flash classify batches in flight per packet. A 2000-page
+# packet fans out to 40 batches; bounding concurrency keeps us from
+# overwhelming Vertex quota while still saving minutes over serial
+# execution. Tests use stub adapters so this value is irrelevant under test.
+_CLASSIFY_CONCURRENCY = 5
+
 
 # --- Public entrypoint ------------------------------------------------------
 
@@ -232,10 +238,15 @@ async def classify_packet(packet_id: uuid.UUID) -> list[ClassifiedDoc]:
         return []
 
     adapter = get_vertex_adapter()
-    classifications: list[dict[str, Any]] = []
-    for batch in _chunk(pages, _PAGES_PER_BATCH):
-        batch_classifications = await _classify_batch(adapter=adapter, pages=batch)
-        classifications.extend(batch_classifications)
+    batches = list(_chunk(pages, _PAGES_PER_BATCH))
+    sem = asyncio.Semaphore(_CLASSIFY_CONCURRENCY)
+
+    async def _run(batch: list[_Page]) -> list[dict[str, Any]]:
+        async with sem:
+            return await _classify_batch(adapter=adapter, pages=batch)
+
+    batch_results = await asyncio.gather(*(_run(b) for b in batches))
+    classifications: list[dict[str, Any]] = [c for br in batch_results for c in br]
 
     classifications.sort(key=lambda c: c["page_number"])
     return _group_into_documents(classifications)
