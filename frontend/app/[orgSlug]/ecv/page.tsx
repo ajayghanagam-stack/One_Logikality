@@ -376,15 +376,19 @@ function Dashboard({
 
   return (
     <div style={{ paddingBottom: 32 }}>
+      {/* Hero + launcher side-by-side */}
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", marginBottom: 20 }}>
       {/* Hero */}
       <section
         style={{
           ...cardStyle,
           padding: 0,
-          marginBottom: 20,
+          marginBottom: 0,
           overflow: "hidden",
           position: "relative",
           borderTop: `3px solid ${chrome.amber}`,
+          width: 390,
+          flexShrink: 0,
         }}
       >
         <div
@@ -400,7 +404,7 @@ function Dashboard({
         />
         <div
           style={{
-            padding: "24px 28px 20px",
+            padding: "18px 20px 16px",
             position: "relative",
           }}
         >
@@ -430,9 +434,9 @@ function Dashboard({
           </div>
           <h1
             style={{
-              fontSize: 26,
+              fontSize: 22,
               fontWeight: 700,
-              margin: "0 0 16px",
+              margin: "0 0 12px",
               color: chrome.charcoal,
               lineHeight: 1.25,
               fontFamily: typography.fontFamily.primary,
@@ -540,13 +544,16 @@ function Dashboard({
           Only renders when the org is subscribed to at least one app;
           otherwise there's nothing to launch and the panel is a visual
           dead weight. */}
-      {appGating.length > 0 && (
-        <AppLauncher
-          gating={appGating}
-          proceedAnyway={proceedAnyway}
-          onBlockedClick={(appId) => setBlockedDialog(appId)}
-        />
-      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {appGating.length > 0 && (
+          <AppLauncher
+            gating={appGating}
+            proceedAnyway={proceedAnyway}
+            onBlockedClick={(appId) => setBlockedDialog(appId)}
+          />
+        )}
+      </div>
+      </div>{/* end hero+launcher row */}
 
 
 
@@ -2649,7 +2656,7 @@ function AppLauncher({
   };
 
   return (
-    <section style={{ ...cardStyle, padding: 16, marginBottom: 20 }}>
+    <section style={{ ...cardStyle, padding: 16, marginBottom: 0, height: "100%" }}>
       <div
         style={{
           fontSize: 10,
@@ -2665,7 +2672,7 @@ function AppLauncher({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+          gridTemplateColumns: "repeat(2, 1fr)",
           gap: 8,
         }}
       >
