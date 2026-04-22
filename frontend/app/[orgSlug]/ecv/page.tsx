@@ -105,6 +105,10 @@ type Section = {
   score: number;
   raw_score: number;
   in_scope: boolean;
+  // True when this section is included in the headline overall_score gauge.
+  // When non-ECV apps are selected, only sections with items explicitly
+  // tagged for those apps drive_score; core sections remain visible but muted.
+  drives_score: boolean;
   line_items: LineItem[];
 };
 
@@ -469,6 +473,7 @@ function Dashboard({
     "Disclosure",
     "Insurance",
     "Closing",
+    "Other",
   ];
   const docsByCategory: Record<string, EcvDocument[]> = {};
   documents.forEach((d) => {
@@ -587,7 +592,7 @@ function Dashboard({
                 {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
               </div>
               <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 200 }}>
-                Weighted across {sections.filter((s) => s.in_scope).length} in-scope sections
+                Weighted across {sections.filter((s) => s.drives_score).length} selected-app section{sections.filter((s) => s.drives_score).length === 1 ? "" : "s"}
               </div>
               <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
                 {summary.passed_items} passed · {summary.review_items} flagged · {summary.critical_items} critical
@@ -1329,7 +1334,10 @@ function SectionsTab({
           Section scores
         </div>
         <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
-          {sections.length} validation sections weighted into the overall score.
+          {sections.filter((s) => s.drives_score).length} section{sections.filter((s) => s.drives_score).length === 1 ? "" : "s"} drive the overall score
+          {sections.filter((s) => s.in_scope && !s.drives_score).length > 0 && (
+            <> · {sections.filter((s) => s.in_scope && !s.drives_score).length} more visible for audit</>
+          )}
         </div>
       </div>
       {sections.map((sec) => {
@@ -1372,6 +1380,23 @@ function SectionsTab({
                   {sec.name}
                   {!sec.in_scope ? (
                     <span style={outOfScopeBadgeStyle}>Out of scope</span>
+                  ) : sec.drives_score ? (
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: chrome.amberDark,
+                        background: chrome.amberBg,
+                        border: `1px solid ${chrome.amberLight}`,
+                        padding: "1px 6px",
+                        borderRadius: 3,
+                        letterSpacing: 0.4,
+                        verticalAlign: "middle",
+                      }}
+                    >
+                      SCORED
+                    </span>
                   ) : null}
                 </div>
                 <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
@@ -1379,6 +1404,8 @@ function SectionsTab({
                   {(sec.weight * 100).toFixed(0)}%
                   {!sec.in_scope
                     ? " · not scored for this packet"
+                    : !sec.drives_score
+                    ? " · visible for audit"
                     : ""}
                 </div>
               </div>

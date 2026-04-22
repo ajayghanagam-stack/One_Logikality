@@ -500,6 +500,11 @@ class EcvSectionOut(BaseModel):
     # Sections with zero in-scope items are rendered as "Not scored —
     # out of scope for this packet" and do not contribute to overall_score.
     in_scope: bool
+    # drives_score is True when this section contributes to the overall_score
+    # gauge. When non-ECV apps are selected, only sections with items
+    # explicitly tagged for those apps drive the score — core ECV sections
+    # (empty app_ids) are visible but don't pull the headline number.
+    drives_score: bool
     line_items: list[EcvLineItemOut]
 
 
@@ -1098,10 +1103,25 @@ async def get_packet_ecv(
     # Build line-item outs once; reuse for severity + section score rollups.
     in_scope_items: list[EcvLineItem] = [i for i in line_items if _item_in_scope(i)]
 
+    # Non-ECV apps selected for this packet. When present, only sections with
+    # items explicitly tagged for those apps drive the headline score — core
+    # ECV items (empty app_ids) remain visible but don't distort the number
+    # for use-cases like title-only or income-only packets.
+    selected_non_ecv = scope_set - {"ecv"}
+
+    def _item_drives_score(item: EcvLineItem) -> bool:
+        """True when this item should contribute to the headline overall_score."""
+        if selected_non_ecv:
+            # Non-ECV apps selected: only explicitly-tagged items for those apps count.
+            return bool(item.app_ids) and any(app_id in scope_set for app_id in item.app_ids)
+        # ECV-only packet: all in-scope items count (current behaviour).
+        return _item_in_scope(item)
+
     section_outs: list[EcvSectionOut] = []
     for sec in sections:
         sec_items = items_by_section.get(sec.id, [])
         sec_in_scope_items = [i for i in sec_items if _item_in_scope(i)]
+        sec_score_items = [i for i in sec_items if _item_drives_score(i)]
         # Recompute score from in-scope items only. `sec.score` is the
         # original all-items mean, preserved on the row as `raw_score`.
         if sec_in_scope_items:
@@ -1117,6 +1137,7 @@ async def get_packet_ecv(
                 score=float(score),
                 raw_score=float(sec.score),
                 in_scope=bool(sec_in_scope_items),
+                drives_score=bool(sec_score_items),
                 line_items=[
                     EcvLineItemOut(
                         id=str(i.id),
@@ -1156,11 +1177,10 @@ async def get_packet_ecv(
         for d in documents
     ]
 
-    # Weighted overall score — mirrors demo's rollup, but only sections
-    # that are in-scope contribute. An all-out-of-scope packet is
-    # impossible in practice (ECV core sections always in-scope), but the
-    # divide-by-zero guard is kept for robustness.
-    weighted_sections = [s for s in section_outs if s.in_scope]
+    # Weighted overall score — only sections that drives_score contribute.
+    # When non-ECV apps are selected this means only app-tagged sections;
+    # for ECV-only packets it degrades gracefully to all in-scope sections.
+    weighted_sections = [s for s in section_outs if s.drives_score]
     total_weight = sum(s.weight for s in weighted_sections)
     overall_score = (
         sum(s.score * s.weight for s in weighted_sections) / total_weight
