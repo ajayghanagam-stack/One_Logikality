@@ -43,12 +43,26 @@ from app.models import (
     APP_IDS,
     REVIEW_STATES,
     AppSubscription,
+    ComplianceCheck,
+    ComplianceFinding,
+    ComplianceFeeTolerance,
+    CompliancePacketMetadata,
     EcvDocument,
     EcvExtraction,
     EcvLineItem,
     EcvSection,
+    IncomeDtiItem,
+    IncomeFinding,
+    IncomePacketMetadata,
+    IncomeSource,
     Packet,
     PacketFile,
+    TitleExamChecklistItem,
+    TitleExamException,
+    TitleExamRequirement,
+    TitleExamWarning,
+    TitleFlag,
+    TitleProperty,
     User,
 )
 from app.pipeline.ecv_stub import run_ecv_stub
@@ -811,11 +825,28 @@ async def reprocess_packet(
     if packet is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
 
-    # Clear all ECV derived data — cascades handle line items / extractions
-    # that hang off sections and documents respectively.
+    # Clear all derived pipeline data so the stub can write fresh rows.
+    # EcvSection cascade-deletes EcvLineItem; EcvDocument cascade-deletes
+    # nothing, so we delete it explicitly. Compliance / Income / Title
+    # tables all have unique constraints on (packet_id, …) so they must
+    # also be cleared before the stub can re-insert them.
     await session.execute(delete(EcvSection).where(EcvSection.packet_id == packet_id))
     await session.execute(delete(EcvDocument).where(EcvDocument.packet_id == packet_id))
     await session.execute(delete(EcvExtraction).where(EcvExtraction.packet_id == packet_id))
+    await session.execute(delete(ComplianceCheck).where(ComplianceCheck.packet_id == packet_id))
+    await session.execute(delete(ComplianceFinding).where(ComplianceFinding.packet_id == packet_id))
+    await session.execute(delete(ComplianceFeeTolerance).where(ComplianceFeeTolerance.packet_id == packet_id))
+    await session.execute(delete(CompliancePacketMetadata).where(CompliancePacketMetadata.packet_id == packet_id))
+    await session.execute(delete(IncomeSource).where(IncomeSource.packet_id == packet_id))
+    await session.execute(delete(IncomeDtiItem).where(IncomeDtiItem.packet_id == packet_id))
+    await session.execute(delete(IncomeFinding).where(IncomeFinding.packet_id == packet_id))
+    await session.execute(delete(IncomePacketMetadata).where(IncomePacketMetadata.packet_id == packet_id))
+    await session.execute(delete(TitleFlag).where(TitleFlag.packet_id == packet_id))
+    await session.execute(delete(TitleProperty).where(TitleProperty.packet_id == packet_id))
+    await session.execute(delete(TitleExamException).where(TitleExamException.packet_id == packet_id))
+    await session.execute(delete(TitleExamRequirement).where(TitleExamRequirement.packet_id == packet_id))
+    await session.execute(delete(TitleExamWarning).where(TitleExamWarning.packet_id == packet_id))
+    await session.execute(delete(TitleExamChecklistItem).where(TitleExamChecklistItem.packet_id == packet_id))
 
     # Reset packet to uploaded so the stub can walk through its stages again.
     packet.status = "uploaded"
