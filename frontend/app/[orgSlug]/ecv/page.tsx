@@ -624,7 +624,7 @@ function Dashboard({
           label="Items to review"
           value={String(itemsToReview.length)}
           trend={{
-            text: `${reviewItems.length} amber`,
+            text: `${criticalItems.length} critical · ${reviewItems.length} amber`,
             color: DESTRUCTIVE,
           }}
         />
@@ -1300,7 +1300,10 @@ function CoverageCard({
                 </div>
               </div>
               <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 2 }}>
-                {row.passed_items} pass · {row.review_items} review
+                {row.passed_items} pass · {row.review_items} review ·{" "}
+                <span style={{ color: row.critical_items > 0 ? DESTRUCTIVE : chrome.mutedFg }}>
+                  {row.critical_items} critical
+                </span>
               </div>
             </div>
           );
