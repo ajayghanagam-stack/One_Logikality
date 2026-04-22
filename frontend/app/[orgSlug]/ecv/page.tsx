@@ -580,38 +580,35 @@ function Dashboard({
               />
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 18, flexShrink: 0 }}>
-            <Gauge score={overall} />
-            <div>
-              <div
-                style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  letterSpacing: 1.2,
-                  textTransform: "uppercase",
-                  color: stat.color,
-                  marginBottom: 4,
-                }}
-              >
-                {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
-              </div>
-              <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 220 }}>
-                Weighted across {sections.filter((s) => s.drives_score).length} selected-app section{sections.filter((s) => s.drives_score).length === 1 ? "" : "s"}
-              </div>
-              <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
-                {summary.passed_items} passed · {summary.review_items} flagged · {summary.critical_items} critical
-                {summary.total_items > 0 ? (
-                  <> · {summary.total_items} scored check{summary.total_items === 1 ? "" : "s"}</>
-                ) : null}
-              </div>
-              {summary.audit_total_items > 0 ? (
-                <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 6, fontStyle: "italic" }}>
-                  Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
-                  {summary.audit_critical_items} critical across {summary.audit_total_items} ECV core check
-                  {summary.audit_total_items === 1 ? "" : "s"} (not in score)
-                </div>
+          <div style={{ flexShrink: 0 }}>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: 1.2,
+                textTransform: "uppercase",
+                color: stat.color,
+                marginBottom: 4,
+              }}
+            >
+              {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
+            </div>
+            <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 220 }}>
+              Weighted across {sections.filter((s) => s.drives_score).length} selected-app section{sections.filter((s) => s.drives_score).length === 1 ? "" : "s"}
+            </div>
+            <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
+              {summary.passed_items} passed · {summary.review_items} flagged · {summary.critical_items} critical
+              {summary.total_items > 0 ? (
+                <> · {summary.total_items} scored check{summary.total_items === 1 ? "" : "s"}</>
               ) : null}
             </div>
+            {summary.audit_total_items > 0 ? (
+              <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 6, fontStyle: "italic" }}>
+                Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
+                {summary.audit_critical_items} critical across {summary.audit_total_items} ECV core check
+                {summary.audit_total_items === 1 ? "" : "s"} (not in score)
+              </div>
+            ) : null}
           </div>
         </div>
       </section>
@@ -1810,76 +1807,6 @@ function KpiCard({
         {value}
       </div>
       <div style={{ fontSize: 11, color: trend.color, fontWeight: 500 }}>{trend.text}</div>
-    </div>
-  );
-}
-
-function Gauge({ score }: { score: number }) {
-  const stat = scoreStatus(score);
-  const size = 120;
-  const stroke = 10;
-  const radius = (size - stroke) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const clamped = Math.max(0, Math.min(100, score));
-  const offset = circumference - (clamped / 100) * circumference;
-  return (
-    <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
-      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          fill="none"
-          stroke={chrome.muted}
-          strokeWidth={stroke}
-        />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          fill="none"
-          stroke={stat.color}
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={offset}
-          style={{ transition: "stroke-dashoffset 300ms ease" }}
-        />
-      </svg>
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <div
-          style={{
-            fontSize: 26,
-            fontWeight: 700,
-            color: chrome.charcoal,
-            lineHeight: 1,
-            fontFamily: typography.fontFamily.primary,
-          }}
-        >
-          {score.toFixed(0)}
-        </div>
-        <div
-          style={{
-            fontSize: 9,
-            fontWeight: 700,
-            color: chrome.mutedFg,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
-            marginTop: 2,
-          }}
-        >
-          Score
-        </div>
-      </div>
     </div>
   );
 }
