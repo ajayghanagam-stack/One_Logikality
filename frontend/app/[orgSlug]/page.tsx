@@ -138,19 +138,30 @@ function PacketList({
     if (!token) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let hasPending = false;
+
+    function clearTimer() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    }
 
     async function fetchOnce() {
+      clearTimer();
       try {
         const rows = await api<PacketRow[]>("/api/packets", { token });
         if (cancelled) return;
         setPackets(rows);
         // Keep polling while any packet is still non-terminal so newly
         // available coverage chips and status pills appear without a
-        // manual refresh.
-        const hasPending = rows.some(
+        // manual refresh. Skip scheduling the next tick while the tab
+        // is hidden — the visibilitychange handler will re-fetch and
+        // resume polling once the user comes back.
+        hasPending = rows.some(
           (p) => p.status !== "completed" && p.status !== "failed",
         );
-        if (hasPending) {
+        if (hasPending && document.visibilityState !== "hidden") {
           timer = setTimeout(fetchOnce, 4000);
         }
       } catch (err) {
@@ -163,10 +174,24 @@ function PacketList({
       }
     }
 
+    function handleVisibility() {
+      if (cancelled) return;
+      if (document.visibilityState === "hidden") {
+        clearTimer();
+      } else if (hasPending && !timer) {
+        // Just became visible and we still have work in flight — refetch
+        // immediately so the user sees the latest state without waiting
+        // up to 4s for the next tick.
+        fetchOnce();
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility);
     fetchOnce();
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      clearTimer();
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [token]);
 
