@@ -335,10 +335,9 @@ function Dashboard({
     app_gating: appGating,
     coverage,
   } = data;
-  const [tab, setTab] = useState<"documents" | "sections" | "review">("documents");
+  const [tab, setTab] = useState<"documents" | "review">("review");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
-  const [reviewFilter, setReviewFilter] = useState<"all" | "critical" | "review">("all");
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
 
@@ -438,10 +437,7 @@ function Dashboard({
   const effectiveProgramId = packet.program_override?.program_id ?? packet.declared_program_id;
   const effectiveProgram = LOAN_PROGRAMS[effectiveProgramId];
 
-  const { itemsToReview, criticalItems, reviewItems } = useMemo(() => {
-    // Only in-scope items drive the "items to review" list — out-of-scope
-    // checks are still visible inside Section Scores (for audit), but
-    // they're not the user's action list and shouldn't be counted as red.
+  const itemsToReview = useMemo(() => {
     const flat = sections
       .flatMap((sec) =>
         sec.line_items.map((it) => ({
@@ -451,20 +447,11 @@ function Dashboard({
         })),
       )
       .filter((it) => it.in_scope);
-    const crit = flat.filter(
-      (i) => severity(i.confidence, summary.critical_threshold, summary.confidence_threshold) === "critical",
+    return flat.filter(
+      (i) => severity(i.confidence, summary.critical_threshold, summary.confidence_threshold) !== "pass",
     );
-    const rev = flat.filter(
-      (i) => severity(i.confidence, summary.critical_threshold, summary.confidence_threshold) === "review",
-    );
-    return { itemsToReview: [...crit, ...rev], criticalItems: crit, reviewItems: rev };
   }, [sections, summary.critical_threshold, summary.confidence_threshold]);
 
-  const filteredReview = useMemo(() => {
-    if (reviewFilter === "critical") return criticalItems;
-    if (reviewFilter === "review") return reviewItems;
-    return itemsToReview;
-  }, [reviewFilter, itemsToReview, criticalItems, reviewItems]);
 
   const CATEGORY_ORDER = [
     "Application",
@@ -592,38 +579,6 @@ function Dashboard({
         </div>
       </section>
 
-      {/* KPIs */}
-      <section style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginBottom: 20 }}>
-        <KpiCard
-          icon={<DocIcon size={18} color={chrome.amber} />}
-          iconBg={chrome.amberBg}
-          iconBorder={chrome.amberLight}
-          label="Documents"
-          value={`${summary.documents_found}/${summary.documents_found + summary.documents_missing}`}
-          trend={{
-            text: summary.documents_missing > 0 ? `${summary.documents_missing} missing` : "All present",
-            color: summary.documents_missing > 0 ? DESTRUCTIVE : SUCCESS,
-          }}
-        />
-        <KpiCard
-          icon={<AlertIcon size={18} color={DESTRUCTIVE} />}
-          iconBg={DESTRUCTIVE_BG}
-          iconBorder={DESTRUCTIVE_BORDER}
-          label="Items to review"
-          value={String(itemsToReview.length)}
-          trend={{
-            text: `${criticalItems.length} critical · ${reviewItems.length} amber`,
-            color: DESTRUCTIVE,
-          }}
-        />
-      </section>
-
-      {/* Scope coverage. Reflects the org's *currently* enabled apps —
-          toggling an app on/off in admin instantly reshapes the pills
-          here without reprocessing the packet. The backend emits a
-          coverage row per active app, so every pill rendered is
-          in-scope by definition. */}
-      <CoverageCard coverage={coverage} sections={sections} />
 
       {/* Downstream-app launcher (US-5.2 / US-5.3).
           Only renders when the org is subscribed to at least one app;
@@ -641,14 +596,13 @@ function Dashboard({
       <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${chrome.border}`, marginBottom: 20 }}>
         {(
           [
+            { key: "review" as const, label: "Findings", count: itemsToReview.length, countColor: DESTRUCTIVE },
             {
               key: "documents" as const,
               label: "Documents",
               count: documents.length,
               countColor: summary.documents_missing > 0 ? DESTRUCTIVE : SUCCESS,
             },
-            { key: "sections" as const, label: "Section scores", count: sections.length, countColor: chrome.mutedFg },
-            { key: "review" as const, label: "Items to review", count: itemsToReview.length, countColor: DESTRUCTIVE },
           ]
         ).map((t) => (
           <button
@@ -700,20 +654,10 @@ function Dashboard({
           missingCount={summary.documents_missing}
         />
       )}
-      {tab === "sections" && (
-        <SectionsTab sections={sections} expanded={expanded} setExpanded={setExpanded} />
-      )}
       {tab === "review" && (
         <ReviewTab
-          items={filteredReview}
-          totalItems={summary.total_items}
-          totalReview={itemsToReview.length}
-          confidenceThreshold={summary.confidence_threshold}
+          items={itemsToReview}
           criticalThreshold={summary.critical_threshold}
-          criticalCount={summary.critical_items}
-          reviewCount={summary.review_items}
-          filter={reviewFilter}
-          setFilter={setReviewFilter}
         />
       )}
 
@@ -1526,153 +1470,84 @@ type ReviewItem = LineItem & { sectionName: string; sectionId: number };
 
 function ReviewTab({
   items,
-  totalItems,
-  totalReview,
-  confidenceThreshold,
   criticalThreshold,
-  criticalCount,
-  reviewCount,
-  filter,
-  setFilter,
 }: {
   items: ReviewItem[];
-  totalItems: number;
-  totalReview: number;
-  confidenceThreshold: number;
   criticalThreshold: number;
-  criticalCount: number;
-  reviewCount: number;
-  filter: "all" | "critical" | "review";
-  setFilter: (f: "all" | "critical" | "review") => void;
 }) {
-  const sorted = useMemo(
-    () => [...items].sort((a, b) => a.confidence - b.confidence),
-    [items],
-  );
+  const groups = useMemo(() => {
+    const sorted = [...items].sort((a, b) => a.confidence - b.confidence);
+    const map = new Map<string, ReviewItem[]>();
+    for (const it of sorted) {
+      const key = it.sectionName;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(it);
+    }
+    return Array.from(map.entries());
+  }, [items]);
+
+  if (items.length === 0) {
+    return (
+      <div style={{ ...cardStyle, padding: "40px 20px", textAlign: "center" }}>
+        <CheckIcon size={32} color={SUCCESS} />
+        <div style={{ fontSize: 14, fontWeight: 600, color: chrome.charcoal, marginTop: 10 }}>
+          No findings — all checks passed.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={cardStyle}>
       <div style={{ padding: "14px 20px", borderBottom: `1px solid ${chrome.muted}` }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: chrome.charcoal }}>
-          Items to review
-        </div>
-        <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
-          {totalReview} of {totalItems} line items fell below the {confidenceThreshold}% confidence
-          threshold · critical &lt; {criticalThreshold}%.
+          {items.length} finding{items.length === 1 ? "" : "s"}
         </div>
       </div>
-      <div
-        style={{
-          padding: "10px 20px",
-          borderBottom: `1px solid ${chrome.muted}`,
-          display: "flex",
-          gap: 8,
-        }}
-      >
-        {(
-          [
-            { key: "all" as const, label: `All (${totalReview})`, color: chrome.charcoal },
-            { key: "critical" as const, label: `Critical (${criticalCount})`, color: DESTRUCTIVE },
-            { key: "review" as const, label: `Review (${reviewCount})`, color: chrome.amber },
-          ]
-        ).map((f) => {
-          const active = filter === f.key;
-          return (
-            <button
-              key={f.key}
-              onClick={() => setFilter(f.key)}
-              style={{
-                fontSize: 11,
-                fontWeight: 700,
-                letterSpacing: 0.4,
-                textTransform: "uppercase",
-                padding: "6px 12px",
-                borderRadius: 14,
-                cursor: "pointer",
-                border: `1px solid ${active ? f.color : chrome.border}`,
-                background: active ? f.color : "#fff",
-                color: active ? "#fff" : f.color,
-                fontFamily: typography.fontFamily.primary,
-              }}
-            >
-              {f.label}
-            </button>
-          );
-        })}
-      </div>
-      {sorted.length === 0 ? (
-        <div style={{ padding: "40px 20px", textAlign: "center" }}>
-          <div style={{ fontSize: 32, marginBottom: 6 }}>
-            <CheckIcon size={32} color={SUCCESS} />
+      {groups.map(([section, groupItems]) => (
+        <div key={section}>
+          <div
+            style={{
+              padding: "8px 20px",
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 0.6,
+              textTransform: "uppercase",
+              color: chrome.mutedFg,
+              background: chrome.bg,
+              borderBottom: `1px solid ${chrome.muted}`,
+            }}
+          >
+            {section}
           </div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: chrome.charcoal }}>
-            Nothing to review in this filter.
-          </div>
-          <div style={{ fontSize: 12, color: chrome.mutedFg, marginTop: 4 }}>
-            Items that fall below the confidence threshold will surface here.
-          </div>
+          {groupItems.map((it) => {
+            const isCritical = it.confidence < criticalThreshold;
+            const color = isCritical ? DESTRUCTIVE : chrome.amber;
+            return (
+              <div
+                key={it.id}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 14,
+                  padding: "12px 20px",
+                  borderBottom: `1px solid ${chrome.bg}`,
+                  borderLeft: `3px solid ${color}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>
+                    {it.check}
+                  </div>
+                  <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 3 }}>
+                    {it.result}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      ) : (
-        sorted.map((it) => {
-          const sev =
-            it.confidence < criticalThreshold
-              ? { label: "CRITICAL", color: DESTRUCTIVE, bg: DESTRUCTIVE_BG }
-              : { label: "REVIEW", color: chrome.amber, bg: chrome.amberBg };
-          return (
-            <div
-              key={it.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 14,
-                padding: "12px 20px",
-                borderBottom: `1px solid ${chrome.bg}`,
-                borderLeft: `3px solid ${sev.color}`,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 9,
-                  fontWeight: 700,
-                  color: sev.color,
-                  background: sev.bg,
-                  padding: "2px 8px",
-                  borderRadius: 3,
-                  letterSpacing: 0.5,
-                  flexShrink: 0,
-                }}
-              >
-                {sev.label}
-              </span>
-              <span
-                style={{
-                  fontSize: 10,
-                  fontFamily: "monospace",
-                  color: chrome.mutedFg,
-                  width: 70,
-                  flexShrink: 0,
-                }}
-              >
-                {it.item_code}
-              </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>
-                  {it.check}
-                </div>
-                <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
-                  §{it.sectionId} {it.sectionName} · {it.result}
-                </div>
-              </div>
-              <div style={{ textAlign: "right", flexShrink: 0 }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: sev.color }}>
-                  {it.confidence}%
-                </div>
-                <div style={{ fontSize: 10, color: chrome.mutedFg }}>confidence</div>
-              </div>
-            </div>
-          );
-        })
-      )}
+      ))}
     </div>
   );
 }
