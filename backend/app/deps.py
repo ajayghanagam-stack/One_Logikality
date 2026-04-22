@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from app.adapters.llm import LLMAdapter
 from app.adapters.llm_anthropic import AnthropicLLMAdapter
+from app.adapters.llm_gemini import GeminiLLMAdapter
 from app.adapters.llm_vertex import VertexLLMAdapter
 from app.config import settings
 from app.db import get_session, set_tenant_context
@@ -139,9 +140,16 @@ async def require_customer_role(
 
 @lru_cache(maxsize=1)
 def get_vertex_adapter() -> LLMAdapter:
+    # Prefer Gemini Developer API key (AI Studio) — works without a service
+    # account or gcloud auth, making it suitable for Replit and CI environments.
+    if settings.gemini_api_key:
+        return GeminiLLMAdapter(api_key=settings.gemini_api_key)
+    # Fall back to Vertex AI via Application Default Credentials.
     if not settings.google_cloud_project:
         raise RuntimeError(
-            "GOOGLE_CLOUD_PROJECT is not set — configure it in .env before using Vertex AI models."
+            "No Gemini credentials configured. Set GEMINI_API_KEY (from "
+            "https://aistudio.google.com) or set GOOGLE_CLOUD_PROJECT with "
+            "Application Default Credentials."
         )
     return VertexLLMAdapter(
         project=settings.google_cloud_project,

@@ -76,9 +76,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(alias="ANTHROPIC_API_KEY", default=None)
     anthropic_model: str = Field(alias="ANTHROPIC_MODEL", default="claude-sonnet-4-6")
 
-    # Google Vertex AI (classification + extraction — Gemini 2.5 Flash / Pro)
-    # Auth is via Application Default Credentials, not an API key — run
-    # `gcloud auth application-default login` or set GOOGLE_APPLICATION_CREDENTIALS.
+    # Google Gemini — two auth paths, tried in order:
+    # 1. GEMINI_API_KEY: Gemini Developer API (AI Studio key). Works anywhere,
+    #    no service account required. Get a key at https://aistudio.google.com.
+    # 2. GOOGLE_CLOUD_PROJECT + ADC: Vertex AI endpoint. Requires Application
+    #    Default Credentials (`gcloud auth application-default login` or
+    #    GOOGLE_APPLICATION_CREDENTIALS pointing to a service account JSON).
+    gemini_api_key: str | None = Field(alias="GEMINI_API_KEY", default=None)
     google_cloud_project: str | None = Field(alias="GOOGLE_CLOUD_PROJECT", default=None)
     google_cloud_region: str = Field(alias="GOOGLE_CLOUD_REGION", default="us-central1")
     vertex_classify_model: str = Field(alias="VERTEX_CLASSIFY_MODEL", default="gemini-2.5-flash")
