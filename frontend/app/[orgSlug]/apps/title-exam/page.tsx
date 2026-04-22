@@ -1712,6 +1712,362 @@ function ChecklistSection({
 
 /* ----- Results tab ---------------------------------------------------- */
 
+type UnifiedFlag = {
+  id: string;
+  kind: FlagKind;
+  itemLabel: string;
+  severity: Severity;
+  title: string;
+  description: string;
+  flag_type: string | null;
+  ai_explanation: string | null;
+  evidence_refs: EvidenceRef[];
+  status: FlagStatus;
+  reviews: ReviewOut[];
+  note: string | null;
+};
+
+type SeverityFilter = "all" | Severity;
+
+const SEV_FILTER_TABS: { key: SeverityFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "critical", label: "Critical" },
+  { key: "high", label: "High" },
+  { key: "medium", label: "Moderate" },
+  { key: "low", label: "Standard" },
+];
+
+function FlagRow({
+  flag,
+  index,
+  isExpanded,
+  isLoading,
+  onToggle,
+  onReview,
+}: {
+  flag: UnifiedFlag;
+  index: number;
+  isExpanded: boolean;
+  isLoading: boolean;
+  onToggle: (id: string) => void;
+  onReview: ReviewHandler;
+}) {
+  const docRef =
+    flag.evidence_refs.length > 0
+      ? "p. " +
+        [...new Set(flag.evidence_refs.map((r) => r.page_number).filter(Boolean))].join(", ")
+      : null;
+
+  const handleAction = async (d: ReviewDecision) => {
+    if (isLoading) return;
+    await onReview(flag.kind, flag.id, d);
+  };
+
+  return (
+    <div
+      style={{
+        borderBottom: `1px solid ${chrome.border}`,
+        background: isExpanded ? "#FAFAF8" : "#FFFFFF",
+        transition: "background 0.12s",
+      }}
+    >
+      {/* Row header */}
+      <div
+        onClick={() => onToggle(flag.id)}
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 10,
+          padding: "13px 20px",
+          cursor: "pointer",
+        }}
+      >
+        {/* Expand chevron */}
+        <span
+          style={{
+            marginTop: 2,
+            color: "#A8A29E",
+            flexShrink: 0,
+            fontSize: 14,
+            transition: "transform 0.15s",
+            display: "inline-block",
+            transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)",
+          }}
+        >
+          ▾
+        </span>
+        {/* Item number */}
+        <span
+          style={{
+            flexShrink: 0,
+            fontSize: 13,
+            fontWeight: 700,
+            color: chrome.charcoal,
+            marginTop: 1,
+            minWidth: 24,
+          }}
+        >
+          {String(index + 1).padStart(2, "0")}
+        </span>
+        {/* Severity badge */}
+        <span style={{ flexShrink: 0, marginTop: 1 }}>
+          <SevBadge severity={flag.severity} />
+        </span>
+        {/* Title + description */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 13,
+              fontWeight: 700,
+              color: chrome.charcoal,
+              lineHeight: 1.4,
+            }}
+          >
+            {flag.title}
+          </p>
+          <p
+            style={{
+              margin: "3px 0 0",
+              fontSize: 12,
+              color: chrome.mutedFg,
+              lineHeight: 1.5,
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {flag.description}
+          </p>
+        </div>
+        {/* Doc ref */}
+        <span
+          style={{
+            flexShrink: 0,
+            fontSize: 11,
+            color: chrome.amberDark,
+            fontWeight: 600,
+            marginTop: 2,
+            minWidth: 48,
+          }}
+        >
+          {docRef ?? "—"}
+        </span>
+        {/* Status badge */}
+        <span style={{ flexShrink: 0, marginTop: 1 }}>
+          <FlagStatusBadge status={flag.status} />
+        </span>
+      </div>
+
+      {/* Expanded detail */}
+      {isExpanded && (
+        <div
+          style={{
+            padding: "0 20px 16px 60px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+          }}
+        >
+          {/* Category + status row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            {flag.flag_type && (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: chrome.mutedFg,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
+                }}
+              >
+                {FLAG_TYPE_LABELS[flag.flag_type] ?? flag.flag_type}
+              </span>
+            )}
+            {flag.status !== "open" && (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  padding: "2px 8px",
+                  borderRadius: 4,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  background:
+                    flag.status === "closed" ? "#DCFCE7" : "#DBEAFE",
+                  color: flag.status === "closed" ? "#166534" : "#1E40AF",
+                }}
+              >
+                {flag.status}
+              </span>
+            )}
+          </div>
+
+          {/* Full description */}
+          <p style={{ margin: 0, fontSize: 13, color: chrome.mutedFg, lineHeight: 1.55 }}>
+            {flag.description}
+          </p>
+
+          {/* AI Examiner's Note — amber box matching TI Hub */}
+          {flag.ai_explanation && (
+            <div
+              style={{
+                borderRadius: 8,
+                background: chrome.amberBg,
+                border: `1px solid ${chrome.amberLight}`,
+                padding: "10px 14px",
+              }}
+            >
+              <p
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: "#92400E",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
+                  margin: "0 0 5px",
+                }}
+              >
+                ✦ Examiner&apos;s Note
+              </p>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#78350F" }}>
+                {flag.ai_explanation}
+              </p>
+            </div>
+          )}
+
+          {/* Evidence refs */}
+          {flag.evidence_refs.length > 0 && (
+            <div>
+              <p
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: chrome.mutedFg,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
+                  margin: "0 0 6px",
+                }}
+              >
+                Evidence ({flag.evidence_refs.length})
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {flag.evidence_refs.map((ref, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 3,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: chrome.amberDark,
+                        background: chrome.amberBg,
+                        border: `1px solid ${chrome.amberLight}`,
+                        padding: "2px 8px",
+                        borderRadius: 4,
+                        flexShrink: 0,
+                      }}
+                    >
+                      📄 Page {ref.page_number}
+                    </span>
+                    {ref.text_snippet && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: chrome.mutedFg,
+                          fontStyle: "italic",
+                          borderLeft: `2px solid ${chrome.amberLight}`,
+                          paddingLeft: 8,
+                          lineHeight: 1.5,
+                          overflow: "hidden",
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                        }}
+                      >
+                        &ldquo;{ref.text_snippet}&rdquo;
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Prior reviews */}
+          {flag.reviews.length > 0 && (
+            <div>
+              <p
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: chrome.mutedFg,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
+                  margin: "0 0 4px",
+                }}
+              >
+                Reviews
+              </p>
+              {flag.reviews.map((r) => (
+                <div key={r.id} style={{ fontSize: 11, color: chrome.charcoal, lineHeight: 1.5 }}>
+                  <strong style={{ textTransform: "uppercase" }}>{r.decision}</strong>
+                  {r.reason_code && ` · ${r.reason_code}`}
+                  {r.notes && ` — ${r.notes}`}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Action buttons */}
+          {flag.status === "open" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 4 }}>
+              {(["approve", "reject", "escalate"] as ReviewDecision[]).map((d) => {
+                const btnTheme = {
+                  approve: { bg: "#ECFDF5", fg: "#065F46", border: "#6EE7B7" },
+                  reject: { bg: "#FEF2F2", fg: "#7F1D1D", border: "#FECACA" },
+                  escalate: { bg: "#FFFBEB", fg: "#78350F", border: "#FCD34D" },
+                }[d];
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    disabled={isLoading}
+                    onClick={(e) => { e.stopPropagation(); void handleAction(d); }}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      padding: "4px 10px",
+                      borderRadius: 6,
+                      border: `1px solid ${btnTheme.border}`,
+                      background: btnTheme.bg,
+                      color: btnTheme.fg,
+                      cursor: isLoading ? "wait" : "pointer",
+                      opacity: isLoading ? 0.6 : 1,
+                      textTransform: "capitalize",
+                      fontFamily: typography.fontFamily.primary,
+                    }}
+                  >
+                    {d === "approve" ? "✓" : d === "reject" ? "✗" : "⚠"} {d}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResultsTab({
   data,
   onReviewFlag,
@@ -1719,111 +2075,233 @@ function ResultsTab({
   data: TitleExamDashboard;
   onReviewFlag: ReviewHandler;
 }) {
-  if (data.specific_exceptions.length === 0) {
+  const [severityFilter, setSeverityFilter] = useState<SeverityFilter>("all");
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [loadingId, setLoadingId] = useState<string | null>(null);
+
+  // Combine specific_exceptions + warnings into one unified flag list
+  const allFlags: UnifiedFlag[] = [
+    ...data.specific_exceptions.map((e) => ({
+      id: e.id,
+      kind: "exception" as FlagKind,
+      itemLabel: `B-${e.number}`,
+      severity: e.severity,
+      title: e.title,
+      description: e.description,
+      flag_type: e.flag_type,
+      ai_explanation: e.ai_explanation,
+      evidence_refs: e.evidence_refs,
+      status: e.status,
+      reviews: e.reviews,
+      note: e.note,
+    })),
+    ...data.warnings.map((w) => ({
+      id: w.id,
+      kind: "warning" as FlagKind,
+      itemLabel: "W",
+      severity: w.severity,
+      title: w.title,
+      description: w.description,
+      flag_type: w.flag_type,
+      ai_explanation: w.ai_explanation,
+      evidence_refs: w.evidence_refs,
+      status: w.status,
+      reviews: w.reviews,
+      note: w.note,
+    })),
+  ].sort((a, b) => {
+    const order: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+    return order[a.severity] - order[b.severity];
+  });
+
+  const filtered =
+    severityFilter === "all"
+      ? allFlags
+      : allFlags.filter((f) => f.severity === severityFilter);
+
+  const counts = {
+    critical: allFlags.filter((f) => f.severity === "critical").length,
+    high: allFlags.filter((f) => f.severity === "high").length,
+    medium: allFlags.filter((f) => f.severity === "medium").length,
+    low: allFlags.filter((f) => f.severity === "low").length,
+  };
+
+  const toggleRow = (id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleReview: ReviewHandler = async (kind, id, decision) => {
+    setLoadingId(id);
+    try {
+      await onReviewFlag(kind, id, decision);
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
+  if (allFlags.length === 0) {
     return (
-      <div style={cardStyle}>
-        <p style={emptyStyle}>No specific exceptions to review.</p>
+      <div style={{ ...cardStyle, textAlign: "center", padding: "48px 28px" }}>
+        <div style={{ fontSize: 32, marginBottom: 8 }}>✓</div>
+        <p style={{ fontSize: 14, fontWeight: 600, color: chrome.charcoal, margin: "0 0 4px" }}>
+          No exceptions or warnings found
+        </p>
+        <p style={emptyStyle}>This packet appears clean.</p>
       </div>
     );
   }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <p style={{ fontSize: 12, color: chrome.mutedFg, margin: 0 }}>
-        Detailed view of Schedule B specific exceptions — the findings that
-        require underwriter judgment.
-      </p>
-      {data.specific_exceptions.map((e) => (
-        <div key={e.id} style={cardStyle}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              marginBottom: 8,
-              flexWrap: "wrap",
-            }}
-          >
-            <span
-              style={{
-                fontFamily: "monospace",
-                fontSize: 12,
-                color: chrome.mutedFg,
-              }}
+    <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+      {/* Section container */}
+      <div style={cardOuter}>
+        {/* Amber section header — matching TI Hub's amber header bar */}
+        <div
+          style={{
+            background: chrome.amberBg,
+            borderBottom: `1px solid ${chrome.amberLight}`,
+            padding: "12px 20px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <h2
+              style={{ fontSize: 15, fontWeight: 700, color: "#78350F", margin: 0 }}
             >
-              B-{e.number}
-            </span>
-            <span
-              style={{
-                fontSize: 15,
-                fontWeight: 700,
-                color: chrome.charcoal,
-              }}
-            >
-              {e.title}
-            </span>
-            <SevBadge severity={e.severity} />
-            {e.flag_type && <FlagTypeBadge flagType={e.flag_type} />}
-            <FlagStatusBadge status={e.status} />
-            {e.page_ref && (
-              <span
-                style={{
-                  fontSize: 10,
-                  fontFamily: "monospace",
-                  color: chrome.mutedFg,
-                }}
-              >
-                {e.page_ref}
+              Exceptions &amp; Required Actions
+              <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 400, color: "#B45309B0" }}>
+                ({allFlags.length})
               </span>
-            )}
+            </h2>
+            <p style={{ margin: "2px 0 0", fontSize: 11, color: "#B45309B0" }}>
+              {counts.critical > 0 && `${counts.critical} critical`}
+              {counts.critical > 0 && counts.high > 0 && " · "}
+              {counts.high > 0 && `${counts.high} high`}
+              {(counts.critical > 0 || counts.high > 0) && counts.medium > 0 && " · "}
+              {counts.medium > 0 && `${counts.medium} moderate`}
+              {(counts.critical > 0 || counts.high > 0 || counts.medium > 0) && counts.low > 0 && " · "}
+              {counts.low > 0 && `${counts.low} standard`}
+            </p>
           </div>
-          <p
-            style={{
-              margin: "0 0 10px",
-              fontSize: 13,
-              color: chrome.charcoal,
-              lineHeight: 1.55,
-            }}
-          >
-            {e.description}
-          </p>
-          {e.note && (
-            <div
-              style={{
-                background: chrome.amberBg,
-                border: `1px solid ${chrome.amberLight}`,
-                borderLeft: `3px solid ${chrome.amber}`,
-                borderRadius: 6,
-                padding: "8px 12px",
-                fontSize: 12,
-                color: "#78350F",
-                lineHeight: 1.55,
-              }}
-            >
-              <span
+        </div>
+
+        {/* Severity filter tabs */}
+        <div
+          style={{
+            display: "flex",
+            gap: 2,
+            padding: "10px 16px",
+            borderBottom: `1px solid ${chrome.border}`,
+            background: "#FAFAF8",
+            flexWrap: "wrap",
+          }}
+        >
+          {SEV_FILTER_TABS.map((t) => {
+            const isActive = severityFilter === t.key;
+            const count =
+              t.key === "all"
+                ? allFlags.length
+                : counts[t.key as Severity] ?? 0;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => {
+                  setSeverityFilter(t.key);
+                  setExpandedIds(new Set());
+                }}
                 style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  letterSpacing: 0.5,
-                  textTransform: "uppercase",
-                  marginRight: 6,
+                  padding: "5px 12px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  borderRadius: 6,
+                  border: isActive
+                    ? `1px solid ${chrome.amberLight}`
+                    : "1px solid transparent",
+                  background: isActive ? chrome.amberBg : "transparent",
+                  color: isActive ? chrome.amberDark : chrome.mutedFg,
+                  cursor: "pointer",
+                  fontFamily: typography.fontFamily.primary,
                 }}
               >
-                Examiner note
-              </span>
-              {e.note}
-            </div>
-          )}
-          <FlagMeta
-            kind="exception"
-            id={e.id}
-            aiExplanation={e.ai_explanation}
-            evidenceRefs={e.evidence_refs}
-            status={e.status}
-            reviews={e.reviews}
-            onReview={onReviewFlag}
-          />
+                {t.label}
+                {count > 0 && (
+                  <span
+                    style={{
+                      marginLeft: 5,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: "0 5px",
+                      borderRadius: 99,
+                      background: isActive ? chrome.amberLight : "#E7E5E4",
+                      color: isActive ? chrome.amberDark : chrome.mutedFg,
+                    }}
+                  >
+                    {count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <span
+            style={{
+              marginLeft: "auto",
+              fontSize: 11,
+              color: chrome.mutedFg,
+              alignSelf: "center",
+            }}
+          >
+            Showing {filtered.length} of {allFlags.length}
+          </span>
         </div>
-      ))}
+
+        {/* Table header */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "8px 20px",
+            background: "#F5F5F4",
+            borderBottom: `1px solid ${chrome.border}`,
+          }}
+        >
+          <span style={{ width: 16, flexShrink: 0 }} />
+          <span style={{ width: 24, fontSize: 9, fontWeight: 700, color: chrome.mutedFg, textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0 }}>#</span>
+          <span style={{ width: 72, fontSize: 9, fontWeight: 700, color: chrome.mutedFg, textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0 }}>Severity</span>
+          <span style={{ flex: 1, fontSize: 9, fontWeight: 700, color: chrome.mutedFg, textTransform: "uppercase", letterSpacing: 0.5 }}>Exception / Warning</span>
+          <span style={{ width: 64, fontSize: 9, fontWeight: 700, color: chrome.mutedFg, textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0, textAlign: "right" as const }}>Doc Ref</span>
+          <span style={{ width: 64, fontSize: 9, fontWeight: 700, color: chrome.mutedFg, textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0 }}>Status</span>
+        </div>
+
+        {/* Flag rows */}
+        {filtered.length === 0 ? (
+          <div style={{ padding: "32px 20px", textAlign: "center" }}>
+            <p style={{ fontSize: 13, color: chrome.mutedFg, margin: 0 }}>
+              No {SEV_FILTER_TABS.find((t) => t.key === severityFilter)?.label.toLowerCase()} flags found.
+            </p>
+          </div>
+        ) : (
+          filtered.map((flag, idx) => (
+            <FlagRow
+              key={flag.id}
+              flag={flag}
+              index={idx}
+              isExpanded={expandedIds.has(flag.id)}
+              isLoading={loadingId === flag.id}
+              onToggle={toggleRow}
+              onReview={handleReview}
+            />
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -1859,143 +2337,268 @@ function PagesTab() {
 /* ----- Export tab ----------------------------------------------------- */
 
 function ExportTab({ data }: { data: TitleExamDashboard }) {
-  const items = [
-    `ALTA exception classification for all ${data.specific_exceptions.length} specific exceptions`,
-    `Schedule B/C analysis (${data.standard_exceptions.length + data.specific_exceptions.length} exceptions, ${data.requirements.length} requirements)`,
-    "Vesting analysis and defect detection",
+  const criticalCount = data.specific_exceptions.filter((e) => e.severity === "critical").length +
+    data.warnings.filter((w) => w.severity === "critical").length;
+  const warningCount = data.specific_exceptions.filter((e) => e.severity === "high" || e.severity === "medium").length +
+    data.warnings.filter((w) => w.severity === "high" || w.severity === "medium").length;
+  const resolvedCount = data.specific_exceptions.filter((e) => e.status !== "open").length +
+    data.warnings.filter((w) => w.status !== "open").length;
+  const totalFlags = data.specific_exceptions.length + data.warnings.length;
+
+  const included = [
+    "Transaction summary with all parties and policy details",
+    `Schedule B exceptions — ${data.standard_exceptions.length} standard, ${data.specific_exceptions.length} specific`,
+    `Schedule C requirements with satisfaction status (${data.requirements.length} items)`,
     `Curative checklist (${data.checklist.length} actions, ${data.checklist_progress.completed} complete)`,
-    "Marketability assessment",
-    "Title insurance requirements",
+    "Key warnings and observations for critical issues",
+    "Vesting analysis and defect detection",
     "Source document page references",
-    "Examiner warnings & notes",
+    "Legal disclaimer",
   ];
+
+  const stats = [
+    { value: criticalCount, label: "Critical", icon: "⚠", iconBg: "#FEF2F2", iconColor: "#DC2626", valueFg: "#991B1B" },
+    { value: warningCount, label: "Warnings", icon: "🛡", iconBg: "#FFFBEB", iconColor: "#D97706", valueFg: "#78350F" },
+    { value: resolvedCount, label: "Resolved", icon: "✓", iconBg: "#F0FDF4", iconColor: "#059669", valueFg: "#166534" },
+  ];
+
   return (
-    <div
-      style={{
-        ...cardStyle,
-        padding: 0,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          background: `linear-gradient(135deg, ${chrome.amberBg}, ${chrome.amberLight}66)`,
-          padding: "24px 28px",
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          borderBottom: `1px solid ${chrome.amberLight}`,
-        }}
-      >
+    <div style={{ maxWidth: 720, display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Hero card — gradient matching TI Hub */}
+      <div style={{ ...cardOuter }}>
+        {/* Gradient hero area */}
         <div
           style={{
-            width: 48,
-            height: 48,
-            borderRadius: 12,
-            background: `linear-gradient(135deg, ${chrome.amberLight}, ${chrome.amber}66)`,
-            border: `1px solid ${chrome.amberLight}`,
-            color: chrome.amberDark,
+            position: "relative",
+            background: `linear-gradient(135deg, ${chrome.amberBg} 0%, rgba(251,191,36,0.06) 60%, transparent 100%)`,
+            padding: "28px 32px",
+            overflow: "hidden",
+          }}
+        >
+          {/* Decorative blobs */}
+          <div
+            style={{
+              position: "absolute",
+              top: -40,
+              right: -40,
+              width: 160,
+              height: 160,
+              borderRadius: "50%",
+              background: `${chrome.amberLight}30`,
+              pointerEvents: "none",
+            }}
+          />
+
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 18, position: "relative" }}>
+            {/* Icon box */}
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 16,
+                background: `linear-gradient(135deg, ${chrome.amberLight}50, ${chrome.amber}30)`,
+                border: `1px solid ${chrome.amberLight}`,
+                color: chrome.amberDark,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <svg
+                width="26"
+                height="26"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+              </svg>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h1
+                style={{
+                  fontSize: 20,
+                  fontWeight: 700,
+                  color: chrome.charcoal,
+                  margin: "0 0 4px",
+                  letterSpacing: "-0.01em",
+                  fontFamily: typography.fontFamily.primary,
+                }}
+              >
+                Title Intelligence Report
+              </h1>
+              <p style={{ margin: "0 0 6px", fontSize: 13, color: chrome.mutedFg }}>
+                ALTA-compliant exception schedule with curative actions
+              </p>
+              <p style={{ margin: 0, fontSize: 12, color: "#A8A29E", lineHeight: 1.55, maxWidth: 440 }}>
+                A comprehensive PDF with property details, executive summary, and all exceptions with recommended actions.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* 3-stat preview — matching TI Hub's report preview grid */}
+        {totalFlags > 0 && (
+          <div style={{ borderTop: `1px solid ${chrome.border}`, padding: "16px 28px" }}>
+            <p
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                textTransform: "uppercase",
+                letterSpacing: 0.8,
+                color: chrome.mutedFg,
+                margin: "0 0 12px",
+              }}
+            >
+              Report Preview
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+              {stats.map((s) => (
+                <div
+                  key={s.label}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "10px 14px",
+                    borderRadius: 10,
+                    border: `1px solid ${chrome.border}`,
+                    background: chrome.card,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: 8,
+                      background: s.iconBg,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                      fontSize: 14,
+                    }}
+                  >
+                    {s.icon}
+                  </div>
+                  <div>
+                    <p
+                      style={{
+                        margin: 0,
+                        fontSize: 20,
+                        fontWeight: 700,
+                        color: s.valueFg,
+                        lineHeight: 1,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {s.value}
+                    </p>
+                    <p style={{ margin: "2px 0 0", fontSize: 10, color: chrome.mutedFg }}>
+                      {s.label}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Download action footer */}
+        <div
+          style={{
+            borderTop: `1px solid ${chrome.border}`,
+            padding: "14px 28px",
+            background: `${chrome.muted}60`,
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
           }}
         >
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="16" y1="13" x2="8" y2="13" />
-            <line x1="16" y1="17" x2="8" y2="17" />
-          </svg>
-        </div>
-        <div>
-          <h2
-            style={{
-              fontSize: 16,
-              fontWeight: 700,
-              margin: "0 0 4px",
-              color: chrome.charcoal,
-            }}
-          >
-            Title examination report
-          </h2>
-          <p style={{ fontSize: 12, color: chrome.mutedFg, margin: 0 }}>
-            ALTA-compliant exception schedule with curative actions
-          </p>
+          <span style={{ fontSize: 12, color: chrome.mutedFg, display: "flex", alignItems: "center", gap: 6 }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            PDF format · Includes all {totalFlags} exception{totalFlags !== 1 ? "s" : ""}
+          </span>
+          <button type="button" style={ctaBtnStyle}>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{ verticalAlign: "middle", marginRight: 5 }}
+            >
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Download PDF
+          </button>
         </div>
       </div>
-      <div style={{ padding: "18px 28px" }}>
-        <div
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            color: chrome.mutedFg,
-            letterSpacing: 1,
-            textTransform: "uppercase",
-            marginBottom: 12,
-          }}
-        >
-          Report includes
+
+      {/* What's included card */}
+      <div style={cardOuter}>
+        <div style={{ padding: "16px 24px", borderBottom: `1px solid ${chrome.border}` }}>
+          <p
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: 0.8,
+              color: chrome.mutedFg,
+              margin: 0,
+            }}
+          >
+            What&apos;s Included
+          </p>
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 8,
-          }}
-        >
-          {items.map((item) => (
+        <div style={{ padding: "14px 24px", display: "flex", flexDirection: "column", gap: 10 }}>
+          {included.map((item) => (
             <div
               key={item}
               style={{
                 display: "flex",
-                alignItems: "center",
-                gap: 7,
+                alignItems: "flex-start",
+                gap: 10,
                 fontSize: 13,
                 color: chrome.charcoal,
+                lineHeight: 1.5,
               }}
             >
               <svg
-                width="12"
-                height="12"
+                width="14"
+                height="14"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="#059669"
                 strokeWidth="2.5"
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                style={{ flexShrink: 0, marginTop: 1 }}
               >
-                <polyline points="20 6 9 17 4 12" />
+                <path d="M22 11.08V12a10 10 0 11-5.93-9.14" />
+                <polyline points="22 4 12 14.01 9 11.01" />
               </svg>
               {item}
             </div>
           ))}
         </div>
-      </div>
-      <div
-        style={{
-          padding: "16px 28px",
-          borderTop: `1px solid ${chrome.border}`,
-          background: `${chrome.muted}80`,
-          display: "flex",
-          gap: 8,
-          justifyContent: "flex-end",
-        }}
-      >
-        <button type="button" style={ctaBtnStyle}>
-          Download PDF
-        </button>
-        <button type="button" style={purpleBtnStyle}>
-          MISMO XML
-        </button>
       </div>
     </div>
   );
@@ -2065,17 +2668,6 @@ const secondaryBtnStyle: React.CSSProperties = {
   fontFamily: typography.fontFamily.primary,
 };
 
-const purpleBtnStyle: React.CSSProperties = {
-  padding: "10px 16px",
-  fontSize: 13,
-  fontWeight: 600,
-  borderRadius: 8,
-  border: "1px solid #BD33A4",
-  background: "#BD33A412",
-  color: "#BD33A4",
-  cursor: "pointer",
-  fontFamily: typography.fontFamily.primary,
-};
 
 const cardStyle: React.CSSProperties = {
   background: chrome.card,

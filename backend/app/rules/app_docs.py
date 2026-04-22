@@ -55,14 +55,6 @@ APP_REQUIRED_DOCS: dict[str, tuple[RequiredDoc, ...]] = {
             "mismo_type": "TITLE_COMMITMENT",
             "reason": "Primary document for defect examination",
         },
-        {
-            "mismo_type": "WARRANTY_DEED",
-            "reason": "Vesting and conveyance verification",
-        },
-        {
-            "mismo_type": "DEED_OF_TRUST",
-            "reason": "Lien and encumbrance analysis",
-        },
     ),
     "compliance": (
         {
