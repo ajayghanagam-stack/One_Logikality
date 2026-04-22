@@ -335,9 +335,6 @@ function Dashboard({
     app_gating: appGating,
     coverage,
   } = data;
-  const [tab, setTab] = useState<"documents" | "review">("review");
-  const [expanded, setExpanded] = useState<number | null>(null);
-  const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
 
@@ -348,82 +345,6 @@ function Dashboard({
       setIsReprocessing(true);
     } catch {
       // silently ignore — keep the UI stable
-    }
-  };
-  // Review-dialog state (US-8.3). `reviewDialog` holds the target
-  // transition being composed; `reviewBusy` guards the action-bar
-  // buttons against double-submits; `reviewError` surfaces 400/500s.
-  const [reviewDialog, setReviewDialog] = useState<ReviewState | null>(null);
-  const [reviewBusy, setReviewBusy] = useState(false);
-  const [reviewError, setReviewError] = useState<string | null>(null);
-  // Export state (US-8.1 PDF / US-8.2 MISMO XML). The auth-carrying
-  // fetch returns a blob we hand to the browser via a synthetic anchor
-  // click. `exportBusy` holds the format currently being downloaded so
-  // only one button spins at a time; `exportError` surfaces on the
-  // sticky bar's status line.
-  const [exportBusy, setExportBusy] = useState<"pdf" | "mismo" | null>(null);
-  const [exportError, setExportError] = useState<string | null>(null);
-
-  const download = async (format: "pdf" | "mismo") => {
-    if (exportBusy) return;
-    setExportBusy(format);
-    setExportError(null);
-    try {
-      const res = await fetch(`/api/packets/${packet.id}/export/${format}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!res.ok) {
-        let detail: string | undefined;
-        try {
-          const body = (await res.json()) as { detail?: string } | undefined;
-          detail = typeof body?.detail === "string" ? body.detail : undefined;
-        } catch {
-          // response wasn't JSON — fall through to generic message
-        }
-        throw new Error(detail ?? `Export failed (${res.status}).`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download =
-        format === "pdf"
-          ? `ecv-report-${packet.id.slice(0, 8)}.pdf`
-          : `ecv-mismo-${packet.id.slice(0, 8)}.xml`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setExportError(
-        err instanceof Error
-          ? err.message
-          : format === "pdf"
-            ? "Couldn't download PDF."
-            : "Couldn't download MISMO XML.",
-      );
-    } finally {
-      setExportBusy(null);
-    }
-  };
-
-  const submitReview = async (state: ReviewState, notes: string | null) => {
-    setReviewBusy(true);
-    setReviewError(null);
-    try {
-      await api(`/api/packets/${packet.id}/review`, {
-        method: "POST",
-        json: { state, notes },
-        token,
-      });
-      setReviewDialog(null);
-      onReviewChanged();
-    } catch (err) {
-      setReviewError(
-        err instanceof ApiError ? (err.detail ?? "Couldn't save review decision.") : "Couldn't save review decision.",
-      );
-    } finally {
-      setReviewBusy(false);
     }
   };
   // Gating UX state (US-5.2 / US-5.3). `blockedDialog` is the app
@@ -437,46 +358,6 @@ function Dashboard({
   const effectiveProgramId = packet.program_override?.program_id ?? packet.declared_program_id;
   const effectiveProgram = LOAN_PROGRAMS[effectiveProgramId];
 
-  const itemsToReview = useMemo(() => {
-    const flat = sections
-      .flatMap((sec) =>
-        sec.line_items.map((it) => ({
-          ...it,
-          sectionName: sec.name,
-          sectionId: sec.section_number,
-        })),
-      )
-      .filter((it) => it.in_scope && it.app_ids.includes("ecv"));
-    return flat.filter(
-      (i) => severity(i.confidence, summary.critical_threshold, summary.confidence_threshold) !== "pass",
-    );
-  }, [sections, summary.critical_threshold, summary.confidence_threshold]);
-
-
-  // "Title" documents belong to Title Examination, not ECV.
-  // They will appear in the Title Exam micro-app view instead.
-  const TITLE_EXAM_CATEGORIES = new Set(["Title"]);
-  const CATEGORY_ORDER = [
-    "Application",
-    "Credit",
-    "Income",
-    "Assets",
-    "Employment",
-    "Property",
-    "Disclosure",
-    "Insurance",
-    "Closing",
-    "Other",
-  ];
-  const docsByCategory: Record<string, EcvDocument[]> = {};
-  documents
-    .filter((d) => !TITLE_EXAM_CATEGORIES.has(d.category))
-    .forEach((d) => {
-      (docsByCategory[d.category] ??= []).push(d);
-    });
-
-  const overall = summary.overall_score;
-  const stat = scoreStatus(overall);
   const shortId = packet.id.slice(0, 8);
   // Prefer the uploaded filename as the hero title — that's what users
   // recognize. Multi-file packets show "<first> +N more"; a zero-file
@@ -667,88 +548,6 @@ function Dashboard({
         />
       )}
 
-      {/* Tab bar */}
-      <div
-        style={{
-          display: "flex",
-          gap: 6,
-          marginBottom: 16,
-          background: chrome.muted,
-          padding: 4,
-          borderRadius: 10,
-          width: "fit-content",
-        }}
-      >
-        {(
-          [
-            { key: "review" as const, label: "Findings", count: itemsToReview.length, countColor: DESTRUCTIVE },
-            {
-              key: "documents" as const,
-              label: "Documents",
-              count: Object.values(docsByCategory).reduce((n, arr) => n + arr.length, 0),
-              countColor: summary.documents_missing > 0 ? DESTRUCTIVE : SUCCESS,
-            },
-          ]
-        ).map((t) => {
-          const active = tab === t.key;
-          return (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              style={{
-                padding: "8px 16px",
-                fontSize: 13,
-                fontWeight: active ? 600 : 500,
-                border: "none",
-                background: active ? chrome.card : "transparent",
-                boxShadow: active ? "0 1px 4px rgba(20,18,14,0.08)" : "none",
-                borderRadius: 7,
-                cursor: "pointer",
-                color: active ? chrome.charcoal : chrome.mutedFg,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                fontFamily: typography.fontFamily.primary,
-                transition: "background 150ms, color 150ms",
-              }}
-            >
-              {t.label}
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: active ? (t.key === "review" ? DESTRUCTIVE : SUCCESS) : chrome.mutedFg,
-                  background: active ? (t.key === "review" ? DESTRUCTIVE_BG : SUCCESS_BG) : chrome.bg,
-                  padding: "1px 7px",
-                  borderRadius: 8,
-                  minWidth: 18,
-                  textAlign: "center",
-                }}
-              >
-                {t.count}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Tab content */}
-      {tab === "documents" && (
-        <DocumentsTab
-          docsByCategory={docsByCategory}
-          categoryOrder={CATEGORY_ORDER}
-          collapsed={collapsedCategories}
-          toggle={toggleCategory}
-          foundCount={summary.documents_found}
-          missingCount={summary.documents_missing}
-        />
-      )}
-      {tab === "review" && (
-        <ReviewTab
-          items={itemsToReview}
-          criticalThreshold={summary.critical_threshold}
-        />
-      )}
 
 
       {isReprocessing && token && (
@@ -776,18 +575,6 @@ function Dashboard({
         />
       )}
 
-      {reviewDialog && (
-        <ReviewDialog
-          state={reviewDialog}
-          busy={reviewBusy}
-          error={reviewError}
-          onCancel={() => {
-            setReviewDialog(null);
-            setReviewError(null);
-          }}
-          onSubmit={(notes) => submitReview(reviewDialog, notes)}
-        />
-      )}
 
       {blockedDialog &&
         (() => {
