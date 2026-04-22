@@ -65,11 +65,7 @@ from app.pipeline.compliance_data import (
 from app.pipeline.compliance_data import (
     OVERALL_CONFIDENCE as COMPLIANCE_CONFIDENCE,
 )
-from app.pipeline.ecv_data import (
-    CONFIRMATION_BY_PROGRAM,
-    ECV_LINE_ITEMS,
-    ECV_SECTIONS,
-)
+from app.pipeline.ecv_data import CONFIRMATION_BY_PROGRAM
 from app.pipeline.extract import extract_packet
 from app.pipeline.income_data import (
     APPLIED_RULES as INCOME_APPLIED_RULES,
@@ -610,73 +606,5 @@ async def _persist_findings(packet_id: uuid.UUID) -> None:
     # (classify output) + extractions (extract output) and grades the 58
     # industry-standard checks, persisting `EcvSection` (with computed
     # scores) + `EcvLineItem` rows. Must run after both earlier stages
-    # have committed their rows. On failure (e.g. no AI keys configured)
-    # we fall back to the canned ECV_SECTIONS / ECV_LINE_ITEMS data so
-    # the dashboard can still display results rather than hanging on 409.
-    try:
-        await validate_packet(packet_id)
-    except Exception:
-        log.exception("validate_packet failed for %s — writing canned fallback sections", packet_id)
-        await _write_fallback_ecv_sections(packet_id)
-
-
-async def _write_fallback_ecv_sections(packet_id: uuid.UUID) -> None:
-    """Write canned ECV sections + line items when the real validate stage fails.
-
-    Checks first whether sections already exist (idempotent) so a hot
-    reload or retry won't trip the unique constraint.
-    """
-    async with SessionLocal() as session:
-        existing = (
-            await session.execute(
-                select(EcvSection.id).where(EcvSection.packet_id == packet_id).limit(1)
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return
-
-        packet_row = (
-            await session.execute(
-                select(Packet.org_id).where(Packet.id == packet_id)
-            )
-        ).scalar_one_or_none()
-        if packet_row is None:
-            log.warning("fallback: packet %s not found", packet_id)
-            return
-        org_id = packet_row
-
-        section_id_map: dict[int, uuid.UUID] = {}
-        for sec in ECV_SECTIONS:
-            sec_id = uuid.uuid4()
-            section_id_map[sec["id"]] = sec_id
-            session.add(
-                EcvSection(
-                    id=sec_id,
-                    packet_id=packet_id,
-                    org_id=org_id,
-                    section_number=sec["id"],
-                    name=sec["name"],
-                    score=sec["score"],
-                    weight=sec["weight"],
-                )
-            )
-
-        for section_num, items in ECV_LINE_ITEMS.items():
-            sec_id = section_id_map.get(section_num)
-            if sec_id is None:
-                continue
-            for item in items:
-                session.add(
-                    EcvLineItem(
-                        section_id=sec_id,
-                        packet_id=packet_id,
-                        org_id=org_id,
-                        item_code=item["id"],
-                        check_description=item["check"],
-                        result_text=item["result"],
-                        confidence=item["confidence"],
-                    )
-                )
-
-        await session.commit()
-        log.info("fallback: wrote canned ECV sections for packet %s", packet_id)
+    # have committed their rows.
+    await validate_packet(packet_id)
