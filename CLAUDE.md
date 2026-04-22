@@ -44,7 +44,7 @@ Helper: `getEffectiveRules(microAppId, programId, packetOverrides, orgOverrides)
 
 ## Packet scope
 
-A packet carries a `scoped_app_ids` array (ECV always locked in). ECV validation checks are tagged with the downstream micro-apps they feed — an income-verification check belongs to `income-calc`, a lien-search check belongs to `title-search`/`title-exam`, etc. Untagged checks are **core ECV** and always in scope.
+A packet carries a `scoped_app_ids` array (ECV always locked in). Every ECV validation check carries an `app_ids` tuple — there is no "applies to everyone" bucket. `"ecv"` is itself a member of `_ALL_APPS` in `backend/app/pipeline/validate.py`, so foundational extraction-quality checks (doc completeness, page legibility, cross-doc reconciliation) are tagged with `_ALL_APPS` and therefore always in scope. Specialized checks are tagged with just the downstream apps they feed — e.g. DTI belongs to `("income-calc",)`, lien checks to `("title-search", "title-exam")`. A check is in scope for a packet iff its `app_ids` intersects the packet's `scoped_app_ids`; since `"ecv"` is always in `scoped_app_ids`, any check tagged with `_ALL_APPS` (or containing `"ecv"`) is always in scope.
 
 At dashboard render time:
 - Per-section score recomputes from **in-scope** items only
