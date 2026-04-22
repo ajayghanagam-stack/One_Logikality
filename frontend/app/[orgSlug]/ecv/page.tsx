@@ -642,14 +642,12 @@ function Dashboard({
         />
       </section>
 
-      {/* Scope coverage. Tells the user which apps this packet was
-          scored against and the per-app roll-up, so "red" checks for
-          out-of-scope apps don't get conflated with real findings. */}
-      <CoverageCard
-        scope={packet.scoped_app_ids}
-        coverage={coverage}
-        sections={sections}
-      />
+      {/* Scope coverage. Reflects the org's *currently* enabled apps —
+          toggling an app on/off in admin instantly reshapes the pills
+          here without reprocessing the packet. The backend emits a
+          coverage row per active app, so every pill rendered is
+          in-scope by definition. */}
+      <CoverageCard coverage={coverage} sections={sections} />
 
       {/* Downstream-app launcher (US-5.2 / US-5.3).
           Only renders when the org is subscribed to at least one app;
@@ -1238,18 +1236,16 @@ const COVERAGE_LABELS: Record<string, string> = {
 };
 
 function CoverageCard({
-  scope,
   coverage,
   sections,
 }: {
-  scope: string[];
   coverage: AppCoverage[];
   sections: Section[];
 }) {
-  // "Out of scope" summary — apps the user didn't pick that still have
-  // checks behind them. Drives the "N checks skipped" line underneath
-  // the per-app rows so users can see what they turned off.
-  const scopeSet = new Set(scope);
+  // "Out of scope" summary — checks tagged for apps the org currently
+  // has disabled. Pre-extracted at pipeline time and instantly visible
+  // here if the admin re-enables those apps. The number underneath the
+  // per-app rows tells the user how much hidden signal exists.
   const outOfScope = sections
     .flatMap((s) => s.line_items)
     .filter((it) => !it.in_scope);

@@ -56,10 +56,12 @@ class _SectionDef(TypedDict):
 class _CheckDef(TypedDict):
     id: str
     check: str
-    # Which downstream micro-apps this check feeds. Omitted (or ()) means
-    # "core ECV check — applies to every packet regardless of scope". When
-    # present, the dashboard treats the check as out-of-scope for any
-    # packet whose `scoped_app_ids` doesn't intersect these ids.
+    # Which micro-apps this check is relevant to. Every check MUST have
+    # at least one app_id — there is no "applies to everyone" bucket.
+    # The dashboard hides any item whose app_ids don't intersect the
+    # org's currently subscribed+enabled apps. ECV is the foundational
+    # extraction-quality bucket (doc completeness, doc quality, page
+    # legibility) and is always enabled.
     app_ids: NotRequired[tuple[str, ...]]
 
 
@@ -88,32 +90,101 @@ _SECTION_DEFS: tuple[_SectionDef, ...] = (
 # industry-standard mortgage validation questions — auditable, durable,
 # and **not** AI-generated. Claude's job is to answer them given the
 # packet's extractions, not to invent the questions.
+_ALL_APPS: tuple[str, ...] = (
+    "ecv",
+    "title-search",
+    "title-exam",
+    "compliance",
+    "income-calc",
+)
+
+
 _CHECK_DEFS: dict[int, tuple[_CheckDef, ...]] = {
+    # Document completeness — foundational extraction-quality. Every
+    # downstream micro-app depends on the right docs being present.
     1: (
-        {"id": "1.1", "check": "All 25 required documents present"},
-        {"id": "1.2", "check": "No missing pages within documents"},
-        {"id": "1.3", "check": "Required addenda & riders attached"},
-        {"id": "1.4", "check": "All signature pages included"},
+        {"id": "1.1", "check": "All 25 required documents present", "app_ids": _ALL_APPS},
+        {"id": "1.2", "check": "No missing pages within documents", "app_ids": _ALL_APPS},
+        {"id": "1.3", "check": "Required addenda & riders attached", "app_ids": _ALL_APPS},
+        {"id": "1.4", "check": "All signature pages included", "app_ids": _ALL_APPS},
     ),
+    # Borrower identity — consumed by compliance (KYC), income-calc
+    # (income matches identity), and title-exam (vesting). Title-search
+    # is parcel-driven, doesn't need identity reconciliation.
     2: (
-        {"id": "2.1", "check": "Borrower name matches across all docs"},
-        {"id": "2.2", "check": "SSN matches on application, credit, tax, 4506-T"},
-        {"id": "2.3", "check": "DOB consistent across documents"},
-        {"id": "2.4", "check": "Marital status consistent"},
-        {"id": "2.5", "check": "Address history matches"},
+        {
+            "id": "2.1",
+            "check": "Borrower name matches across all docs",
+            "app_ids": ("compliance", "income-calc", "title-exam"),
+        },
+        {
+            "id": "2.2",
+            "check": "SSN matches on application, credit, tax, 4506-T",
+            "app_ids": ("compliance", "income-calc"),
+        },
+        {
+            "id": "2.3",
+            "check": "DOB consistent across documents",
+            "app_ids": ("compliance", "income-calc"),
+        },
+        {
+            "id": "2.4",
+            "check": "Marital status consistent",
+            "app_ids": ("compliance", "title-exam"),
+        },
+        {
+            "id": "2.5",
+            "check": "Address history matches",
+            "app_ids": ("compliance", "income-calc"),
+        },
     ),
+    # Property consistency — title is the primary consumer; compliance
+    # cares about address on disclosures.
     3: (
-        {"id": "3.1", "check": "Property address matches on every document"},
-        {"id": "3.2", "check": "Legal description matches deed, title, appraisal"},
-        {"id": "3.3", "check": "Parcel/APN number consistent"},
-        {"id": "3.4", "check": "Property type consistent (SFR/Condo/Multi)"},
+        {
+            "id": "3.1",
+            "check": "Property address matches on every document",
+            "app_ids": ("title-search", "title-exam", "compliance"),
+        },
+        {
+            "id": "3.2",
+            "check": "Legal description matches deed, title, appraisal",
+            "app_ids": ("title-search", "title-exam"),
+        },
+        {
+            "id": "3.3",
+            "check": "Parcel/APN number consistent",
+            "app_ids": ("title-search", "title-exam"),
+        },
+        {
+            "id": "3.4",
+            "check": "Property type consistent (SFR/Condo/Multi)",
+            "app_ids": ("title-search", "title-exam", "compliance"),
+        },
     ),
+    # Loan terms — compliance (TRID/RESPA/CD) and income-calc (DTI math).
     4: (
-        {"id": "4.1", "check": "Loan amount matches across LE, CD, Note, Deed"},
-        {"id": "4.2", "check": "Interest rate consistent"},
-        {"id": "4.3", "check": "Loan term matches"},
-        {"id": "4.4", "check": "Monthly P&I calculates correctly"},
-        {"id": "4.5", "check": "Escrow amounts for tax/insurance match"},
+        {
+            "id": "4.1",
+            "check": "Loan amount matches across LE, CD, Note, Deed",
+            "app_ids": ("compliance", "income-calc"),
+        },
+        {
+            "id": "4.2",
+            "check": "Interest rate consistent",
+            "app_ids": ("compliance", "income-calc"),
+        },
+        {"id": "4.3", "check": "Loan term matches", "app_ids": ("compliance", "income-calc")},
+        {
+            "id": "4.4",
+            "check": "Monthly P&I calculates correctly",
+            "app_ids": ("compliance", "income-calc"),
+        },
+        {
+            "id": "4.5",
+            "check": "Escrow amounts for tax/insurance match",
+            "app_ids": ("compliance",),
+        },
     ),
     5: (
         {
@@ -134,11 +205,29 @@ _CHECK_DEFS: dict[int, tuple[_CheckDef, ...]] = {
             "app_ids": ("income-calc",),
         },
     ),
+    # Appraisal — LTV is income-calc; legal description in appraisal is
+    # a title-exam concern; compliance verifies appraiser independence.
     6: (
-        {"id": "6.1", "check": "Appraised value supports LTV ratio"},
-        {"id": "6.2", "check": "Appraisal dated within acceptable window"},
-        {"id": "6.3", "check": "Comparable sales appropriate"},
-        {"id": "6.4", "check": "Appraiser licensed for state"},
+        {
+            "id": "6.1",
+            "check": "Appraised value supports LTV ratio",
+            "app_ids": ("income-calc", "compliance"),
+        },
+        {
+            "id": "6.2",
+            "check": "Appraisal dated within acceptable window",
+            "app_ids": ("compliance",),
+        },
+        {
+            "id": "6.3",
+            "check": "Comparable sales appropriate",
+            "app_ids": ("income-calc",),
+        },
+        {
+            "id": "6.4",
+            "check": "Appraiser licensed for state",
+            "app_ids": ("compliance",),
+        },
     ),
     7: (
         {
@@ -180,34 +269,89 @@ _CHECK_DEFS: dict[int, tuple[_CheckDef, ...]] = {
             "app_ids": ("compliance",),
         },
     ),
+    # Signatures & dates — title-exam (notarization on deed/mortgage),
+    # compliance (TRID timing). Title-search and income-calc don't sign.
     9: (
-        {"id": "9.1", "check": "All parties signed required documents"},
-        {"id": "9.2", "check": "Signatures consistent across documents"},
-        {"id": "9.3", "check": "Dates logical and chronological"},
-        {"id": "9.4", "check": "Notarization valid (seal, commission, state)"},
+        {
+            "id": "9.1",
+            "check": "All parties signed required documents",
+            "app_ids": ("title-exam", "compliance"),
+        },
+        {
+            "id": "9.2",
+            "check": "Signatures consistent across documents",
+            "app_ids": ("title-exam", "compliance"),
+        },
+        {
+            "id": "9.3",
+            "check": "Dates logical and chronological",
+            "app_ids": ("title-exam", "compliance"),
+        },
+        {
+            "id": "9.4",
+            "check": "Notarization valid (seal, commission, state)",
+            "app_ids": ("title-exam", "compliance"),
+        },
     ),
+    # Insurance — compliance owns hazard/flood/PMI disclosures.
     10: (
-        {"id": "10.1", "check": "Hazard insurance in force"},
-        {"id": "10.2", "check": "Lender listed as mortgagee"},
-        {"id": "10.3", "check": "Flood insurance (if required)"},
-        {"id": "10.4", "check": "PMI disclosed and in place"},
+        {"id": "10.1", "check": "Hazard insurance in force", "app_ids": ("compliance",)},
+        {"id": "10.2", "check": "Lender listed as mortgagee", "app_ids": ("compliance",)},
+        {"id": "10.3", "check": "Flood insurance (if required)", "app_ids": ("compliance",)},
+        {"id": "10.4", "check": "PMI disclosed and in place", "app_ids": ("compliance",)},
     ),
+    # Document quality — foundational extraction-quality. Owned by ECV
+    # because it's the engine that must read the docs in the first place.
     11: (
-        {"id": "11.1", "check": "All pages legible"},
-        {"id": "11.2", "check": "No signs of alteration or tampering"},
-        {"id": "11.3", "check": "Correct orientation on all pages"},
-        {"id": "11.4", "check": "No DRAFT watermarks on final docs"},
+        {"id": "11.1", "check": "All pages legible", "app_ids": _ALL_APPS},
+        {
+            "id": "11.2",
+            "check": "No signs of alteration or tampering",
+            "app_ids": _ALL_APPS,
+        },
+        {"id": "11.3", "check": "Correct orientation on all pages", "app_ids": _ALL_APPS},
+        {"id": "11.4", "check": "No DRAFT watermarks on final docs", "app_ids": _ALL_APPS},
     ),
+    # Condition clearance — compliance/lender. Title doesn't see PTD/PTF.
     12: (
-        {"id": "12.1", "check": "Prior-to-doc conditions satisfied"},
-        {"id": "12.2", "check": "Prior-to-funding conditions satisfied"},
-        {"id": "12.3", "check": "All conditions documented with evidence"},
+        {
+            "id": "12.1",
+            "check": "Prior-to-doc conditions satisfied",
+            "app_ids": ("compliance",),
+        },
+        {
+            "id": "12.2",
+            "check": "Prior-to-funding conditions satisfied",
+            "app_ids": ("compliance",),
+        },
+        {
+            "id": "12.3",
+            "check": "All conditions documented with evidence",
+            "app_ids": ("compliance",),
+        },
     ),
+    # Cross-doc reconciliation — closing math = compliance + income-calc.
     13: (
-        {"id": "13.1", "check": "CD closing costs match settlement statement"},
-        {"id": "13.2", "check": "Prorated taxes calculate correctly"},
-        {"id": "13.3", "check": "Cash-to-close reconciles"},
-        {"id": "13.4", "check": "Prepaid interest calculates correctly"},
+        {
+            "id": "13.1",
+            "check": "CD closing costs match settlement statement",
+            "app_ids": ("compliance",),
+        },
+        {
+            "id": "13.2",
+            "check": "Prorated taxes calculate correctly",
+            "app_ids": ("compliance",),
+        },
+        {
+            "id": "13.3",
+            "check": "Cash-to-close reconciles",
+            "app_ids": ("compliance", "income-calc"),
+        },
+        {
+            "id": "13.4",
+            "check": "Prepaid interest calculates correctly",
+            "app_ids": ("compliance",),
+        },
     ),
 }
 

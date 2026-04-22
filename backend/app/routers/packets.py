@@ -548,9 +548,12 @@ def _packet_coverage_for_list(
     """
     if not line_items:
         return None
-    scope_set = set(packet.scoped_app_ids or ["ecv"])
-    coverage_scope = scope_set & enabled_subs
-    coverage_scope.add("ecv")  # always foundational
+    # Scope = the org's currently enabled apps. The packet's frozen
+    # scoped_app_ids no longer gates display — every check is extracted
+    # at pipeline time and dynamically surfaced for whichever apps the
+    # org has on right now. ECV is always included.
+    coverage_scope = set(enabled_subs)
+    coverage_scope.add("ecv")
     return _compute_coverage(coverage_scope, line_items)
 
 
@@ -1171,12 +1174,34 @@ async def get_packet_ecv(
     for item in line_items:
         items_by_section.setdefault(item.section_id, []).append(item)
 
-    scope_set = set(packet.scoped_app_ids or ["ecv"])
+    # Scope is driven by the org's *currently* subscribed+enabled apps,
+    # NOT by the packet's frozen scoped_app_ids. The pipeline always
+    # extracts/validates every check for every packet, so toggling an
+    # app on (e.g. compliance) instantly reveals already-stored data
+    # with no reprocessing. The packet's scoped_app_ids is preserved as
+    # a historical record of intent at upload time but no longer gates
+    # the dashboard.
+    enabled_subs = {
+        row.app_id
+        for row in (
+            await session.execute(
+                select(AppSubscription).where(
+                    AppSubscription.org_id == packet.org_id,
+                    AppSubscription.enabled.is_(True),
+                )
+            )
+        ).scalars()
+    }
+    enabled_subs.add("ecv")  # foundational, always on
+    scope_set = enabled_subs
 
     def _item_in_scope(item: EcvLineItem) -> bool:
-        # Core checks (no app_ids tag) apply to every packet.
+        # Every check now has explicit app_ids tags. An item is in scope
+        # iff at least one of its tags matches the org's enabled apps.
+        # Defensive fallback: legacy items with no tags are treated as
+        # core foundational (ecv) so they remain visible.
         if not item.app_ids:
-            return True
+            return "ecv" in scope_set
         return any(app_id in scope_set for app_id in item.app_ids)
 
     # Build line-item outs once; reuse for severity + section score rollups.
@@ -1307,29 +1332,10 @@ async def get_packet_ecv(
         documents_missing=missing_docs,
     )
 
-    # Coverage card is "what's currently active for this org" — intersect
-    # the packet's stored scope with apps the org is *currently* both
-    # subscribed to AND has enabled. ECV is foundational and locked-on,
-    # so it's always included even if the row is somehow missing. Apps
-    # the customer admin later disabled simply stop appearing here; the
-    # rest of the dashboard (sections, line items, documents) is unaffected.
-    enabled_subs = {
-        row.app_id
-        for row in (
-            await session.execute(
-                select(AppSubscription).where(
-                    AppSubscription.org_id == packet.org_id,
-                    AppSubscription.enabled.is_(True),
-                )
-            )
-        ).scalars()
-    }
-    enabled_subs.add("ecv")
-    coverage_scope = scope_set & enabled_subs
-    # Force-include ecv even if a packet's stored scope is anomalous and
-    # somehow lacks it — ECV is foundational and must always render.
-    coverage_scope.add("ecv")
-    coverage = _compute_coverage(coverage_scope, line_items)
+    # Coverage card is "what's currently active for this org". Since
+    # scope_set is now sourced directly from the org's enabled
+    # subscriptions (above), reuse it as-is. ECV is already force-added.
+    coverage = _compute_coverage(scope_set, line_items)
     app_gating = await _compute_app_gating(session, packet.org_id, documents)
 
     return EcvDashboardOut(
