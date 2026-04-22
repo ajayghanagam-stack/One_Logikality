@@ -384,7 +384,7 @@ function Dashboard({
           marginBottom: 20,
           overflow: "hidden",
           position: "relative",
-          borderTop: `3px solid ${brand.teal}`,
+          borderTop: `3px solid ${chrome.amber}`,
         }}
       >
         <div
@@ -394,7 +394,7 @@ function Dashboard({
             right: 0,
             width: 360,
             height: 220,
-            background: `radial-gradient(circle at top right, ${brand.teal}08, transparent 65%)`,
+            background: `radial-gradient(circle at top right, ${chrome.amber}08, transparent 65%)`,
             pointerEvents: "none",
           }}
         />
@@ -408,7 +408,7 @@ function Dashboard({
             style={{
               fontSize: 10,
               fontWeight: 700,
-              color: brand.teal,
+              color: chrome.amber,
               letterSpacing: 1.4,
               textTransform: "uppercase",
               marginBottom: 8,
@@ -423,7 +423,7 @@ function Dashboard({
                 width: 6,
                 height: 6,
                 borderRadius: "50%",
-                background: brand.teal,
+                background: chrome.amber,
               }}
             />
             ECV Validation Report
@@ -482,9 +482,9 @@ function Dashboard({
                     style={{
                       fontSize: 11,
                       fontWeight: 700,
-                      color: brand.teal,
-                      background: `${brand.teal}14`,
-                      border: `1px solid ${brand.teal}30`,
+                      color: chrome.amberDark,
+                      background: chrome.amberBg,
+                      border: `1px solid ${chrome.amberLight}`,
                       padding: "2px 10px",
                       borderRadius: 10,
                       textTransform: "capitalize",
