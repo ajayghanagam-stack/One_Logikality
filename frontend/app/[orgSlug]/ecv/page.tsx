@@ -587,12 +587,10 @@ function Dashboard({
                 {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
               </div>
               <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 200 }}>
-                {overall >= summary.auto_approve_threshold
-                  ? "Auto-approval eligible"
-                  : `Score below ${summary.auto_approve_threshold}% — needs manual review`}
+                Weighted across {sections.filter((s) => s.in_scope).length} in-scope sections
               </div>
               <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
-                Weighted across {sections.length} sections
+                {summary.passed_items} passed · {summary.review_items} flagged · {summary.critical_items} critical
               </div>
             </div>
           </div>
@@ -600,7 +598,7 @@ function Dashboard({
       </section>
 
       {/* KPIs */}
-      <section style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
+      <section style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginBottom: 20 }}>
         <KpiCard
           icon={<DocIcon size={18} color={chrome.amber} />}
           iconBg={chrome.amberBg}
@@ -621,17 +619,6 @@ function Dashboard({
           trend={{
             text: `${summary.critical_items} critical · ${summary.review_items} amber`,
             color: DESTRUCTIVE,
-          }}
-        />
-        <KpiCard
-          icon={<CheckIcon size={18} color={SUCCESS} />}
-          iconBg={SUCCESS_BG}
-          iconBorder={SUCCESS_BORDER}
-          label="Auto-verified"
-          value={`${summary.passed_items}/${summary.total_items}`}
-          trend={{
-            text: `${itemsToReview.length} need review`,
-            color: chrome.mutedFg,
           }}
         />
       </section>
@@ -1984,20 +1971,7 @@ function ConfirmationPill({
   }
 
   if (!confirmation) {
-    // Pipeline hasn't produced a verdict yet. Render a muted placeholder
-    // so the hero layout doesn't collapse.
-    return (
-      <PillShell
-        tone="muted"
-        icon={<InfoIcon size={14} color={chrome.mutedFg} />}
-        eyebrow="Awaiting ECV"
-        body="Confirmation runs during the score stage."
-        detail={null}
-        canChange={false}
-        changeLabel=""
-        onChange={onChange}
-      />
-    );
+    return null;
   }
 
   if (confirmation.status === "confirmed") {
