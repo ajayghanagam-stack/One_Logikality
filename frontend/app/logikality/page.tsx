@@ -33,8 +33,7 @@ export default function LogikalityLanding() {
     }
   }, [hydrated, user, router]);
 
-  if (!hydrated) return null;
-  if (user) return null; // waiting on the redirect above
+  if (hydrated && user) return null; // waiting on the redirect above
 
   return (
     <AuthBrandPanel>

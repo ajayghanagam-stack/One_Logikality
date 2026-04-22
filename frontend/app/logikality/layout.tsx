@@ -21,9 +21,7 @@ import { useAuth } from "@/lib/auth";
 export default function PlatformAdminLayout({ children }: { children: ReactNode }) {
   const { user, hydrated } = useAuth();
 
-  if (!hydrated) return null;
-
-  if (user?.role === "platform_admin") {
+  if (hydrated && user?.role === "platform_admin") {
     return (
       <div style={{ display: "flex", minHeight: "100vh", backgroundColor: chrome.bg }}>
         <Sidebar />
