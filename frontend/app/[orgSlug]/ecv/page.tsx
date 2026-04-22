@@ -1255,8 +1255,9 @@ function CoverageCard({
             Coverage
           </div>
           <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
-            Apps this packet was scored against. Out-of-scope checks stay
-            visible below but don&apos;t drive red.
+            Each app pill scores only the checks tagged for it. ECV is
+            the catch-all bucket. Out-of-scope checks stay visible below
+            but don&apos;t drive red.
           </div>
         </div>
         {outOfScope.length > 0 ? (

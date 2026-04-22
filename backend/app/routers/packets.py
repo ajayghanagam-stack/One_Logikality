@@ -1211,7 +1211,26 @@ async def get_packet_ecv(
         documents_missing=missing_docs,
     )
 
-    coverage = _compute_coverage(scope_set, line_items)
+    # Coverage card is "what's currently active for this org" — intersect
+    # the packet's stored scope with apps the org is *currently* both
+    # subscribed to AND has enabled. ECV is foundational and locked-on,
+    # so it's always included even if the row is somehow missing. Apps
+    # the customer admin later disabled simply stop appearing here; the
+    # rest of the dashboard (sections, line items, documents) is unaffected.
+    enabled_subs = {
+        row.app_id
+        for row in (
+            await session.execute(
+                select(AppSubscription).where(
+                    AppSubscription.org_id == packet.org_id,
+                    AppSubscription.enabled.is_(True),
+                )
+            )
+        ).scalars()
+    }
+    enabled_subs.add("ecv")
+    coverage_scope = scope_set & enabled_subs
+    coverage = _compute_coverage(coverage_scope, line_items)
     app_gating = await _compute_app_gating(session, packet.org_id, documents)
 
     return EcvDashboardOut(
@@ -1230,19 +1249,22 @@ def _compute_coverage(
 ) -> list[AppCoverageOut]:
     """Build per-app coverage rows for every app in the packet's scope.
 
-    For each app in `scope_set`, count the checks that feed it (either
-    tagged with the app id, or core/untagged which apply to every app).
-    The severity buckets and mean-score are useful for the Coverage card's
-    "Title Exam — 8 checks, 82% score" summary.
+    For the `ecv` pill, count core (untagged) checks plus items tagged
+    `ecv` — ECV is the catch-all bucket. For every other app, count
+    ONLY items explicitly tagged for that app, so the per-app score
+    reflects that app's specific signal (e.g. Title Examination =
+    mean of just title-exam items, not diluted by 41 core ECV checks).
     """
     rows: list[AppCoverageOut] = []
     for app_id in sorted(scope_set):
-        app_items = [
-            i
-            for i in line_items
-            if not i.app_ids  # core checks count for every app
-            or app_id in i.app_ids
-        ]
+        if app_id == "ecv":
+            app_items = [
+                i for i in line_items if not i.app_ids or "ecv" in i.app_ids
+            ]
+        else:
+            app_items = [
+                i for i in line_items if i.app_ids and app_id in i.app_ids
+            ]
         if not app_items:
             rows.append(
                 AppCoverageOut(
