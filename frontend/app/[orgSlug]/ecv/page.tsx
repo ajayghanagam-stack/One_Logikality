@@ -593,12 +593,6 @@ function Dashboard({
             >
               {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
             </div>
-            <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
-              {summary.passed_items} passed · {summary.review_items} flagged
-              {summary.total_items > 0 ? (
-                <> · {summary.total_items} scored check{summary.total_items === 1 ? "" : "s"}</>
-              ) : null}
-            </div>
             {summary.audit_total_items > 0 ? (
               <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 6, fontStyle: "italic" }}>
                 Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
