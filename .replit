@@ -1,0 +1,16 @@
+modules = ["python-3.12", "nodejs-20", "bash"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+JWT_EXPIRATION_MINUTES = "1440"
+STORAGE_PROVIDER = "local"
+STORAGE_PATH = "./storage"
+PIPELINE_BACKEND = "background_tasks"
+AI_PROVIDER = "hybrid"
+TEMPORAL_ADDRESS = "localhost:7234"
