@@ -25,6 +25,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db import SessionLocal
+from app.models import EcvLineItem, EcvSection, Packet
 from app.pipeline.ecv_stub import PIPELINE_STAGES
 from app.security import hash_password
 
@@ -358,4 +359,218 @@ async def _cleanup_packets(org_id: uuid.UUID) -> None:
             text("DELETE FROM packets WHERE org_id = :o"),
             {"o": org_id},
         )
+        await session.execute(
+            text("DELETE FROM app_subscriptions WHERE org_id = :o"),
+            {"o": org_id},
+        )
         await session.commit()
+
+
+# --- list endpoint coverage chips (US-2.6 home dashboard) -----------
+
+
+async def _seed_completed_packet_with_coverage(
+    *,
+    org_id: uuid.UUID,
+    created_by: uuid.UUID,
+) -> uuid.UUID:
+    """Insert a `completed` packet plus a single section with line items
+    tagged for `compliance` and `ecv`, used by the coverage-chip tests.
+
+    Returns the packet id. Bypasses the upload pipeline so the test is
+    fully deterministic about which line items exist and what their
+    `app_ids` look like — the goal is to assert `_packet_coverage_for_list`'s
+    per-app filtering rules, not exercise the real pipeline.
+
+    Confidence values are picked relative to the router's thresholds
+    (`_CONFIDENCE_THRESHOLD = 85`, `_CRITICAL_THRESHOLD = 50`):
+      - compliance: 90 (passed), 70 (review), 30 (critical) → mean 63.3
+      - ecv: untagged 95 (passed), tagged 80 (review)       → mean 87.5
+    """
+    async with SessionLocal() as session:
+        packet = Packet(
+            org_id=org_id,
+            declared_program_id="conventional",
+            status="completed",
+            created_by=created_by,
+            scoped_app_ids=["compliance", "ecv"],
+        )
+        session.add(packet)
+        await session.flush()
+
+        section = EcvSection(
+            packet_id=packet.id,
+            org_id=org_id,
+            section_number=1,
+            name="Coverage Test Section",
+            weight=10,
+            score=80.0,
+        )
+        session.add(section)
+        await session.flush()
+
+        rows = [
+            # Compliance-tagged checks: all three buckets represented.
+            EcvLineItem(
+                section_id=section.id,
+                packet_id=packet.id,
+                org_id=org_id,
+                item_code="COMP-PASS",
+                check_description="Compliance passed",
+                result_text="ok",
+                confidence=90,
+                app_ids=["compliance"],
+            ),
+            EcvLineItem(
+                section_id=section.id,
+                packet_id=packet.id,
+                org_id=org_id,
+                item_code="COMP-REVIEW",
+                check_description="Compliance review",
+                result_text="needs review",
+                confidence=70,
+                app_ids=["compliance"],
+            ),
+            EcvLineItem(
+                section_id=section.id,
+                packet_id=packet.id,
+                org_id=org_id,
+                item_code="COMP-CRIT",
+                check_description="Compliance critical",
+                result_text="critical",
+                confidence=30,
+                app_ids=["compliance"],
+            ),
+            # ECV catch-all: one untagged (core) item and one explicitly
+            # tagged `ecv`. Both should land in the ecv bucket.
+            EcvLineItem(
+                section_id=section.id,
+                packet_id=packet.id,
+                org_id=org_id,
+                item_code="ECV-CORE",
+                check_description="Core ECV check",
+                result_text="ok",
+                confidence=95,
+                app_ids=None,
+            ),
+            EcvLineItem(
+                section_id=section.id,
+                packet_id=packet.id,
+                org_id=org_id,
+                item_code="ECV-TAGGED",
+                check_description="Explicitly tagged ECV check",
+                result_text="ok",
+                confidence=80,
+                app_ids=["ecv"],
+            ),
+        ]
+        session.add_all(rows)
+        await session.commit()
+        return packet.id
+
+
+async def _subscribe(org_id: uuid.UUID, app_id: str, *, enabled: bool) -> None:
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                "INSERT INTO app_subscriptions (org_id, app_id, enabled) "
+                "VALUES (:o, :a, :e)"
+            ),
+            {"o": org_id, "a": app_id, "e": enabled},
+        )
+        await session.commit()
+
+
+async def _set_subscription_enabled(
+    org_id: uuid.UUID, app_id: str, *, enabled: bool
+) -> None:
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                "UPDATE app_subscriptions SET enabled = :e "
+                "WHERE org_id = :o AND app_id = :a"
+            ),
+            {"o": org_id, "a": app_id, "e": enabled},
+        )
+        await session.commit()
+
+
+async def test_list_packets_returns_per_app_coverage_chips(
+    client: AsyncClient, seeded, storage_tmp
+) -> None:
+    """The list endpoint surfaces per-app coverage rows for completed
+    packets. Non-ECV apps average ONLY their tagged items; ECV averages
+    both untagged (core) items and items explicitly tagged `ecv`."""
+    org_id = seeded["org_id"]
+    await _subscribe(org_id, "compliance", enabled=True)
+    packet_id = await _seed_completed_packet_with_coverage(
+        org_id=org_id, created_by=seeded["customer_admin_id"]
+    )
+
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.get(
+        "/api/packets",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == str(packet_id)
+
+    coverage = {row["app_id"]: row for row in rows[0]["coverage"]}
+    assert set(coverage) == {"ecv", "compliance"}
+
+    # Compliance chip: averages only its three tagged items.
+    comp = coverage["compliance"]
+    assert comp["total_items"] == 3
+    assert comp["passed_items"] == 1
+    assert comp["review_items"] == 1
+    assert comp["critical_items"] == 1
+    assert comp["score"] == pytest.approx(63.3)
+
+    # ECV chip: catch-all bucket — untagged core check + explicitly
+    # tagged `ecv` check, but NOT the compliance-tagged items.
+    ecv = coverage["ecv"]
+    assert ecv["total_items"] == 2
+    assert ecv["passed_items"] == 1
+    assert ecv["review_items"] == 1
+    assert ecv["critical_items"] == 0
+    assert ecv["score"] == pytest.approx(87.5)
+
+    await _cleanup_packets(org_id)
+
+
+async def test_list_packets_drops_chip_when_app_disabled(
+    client: AsyncClient, seeded, storage_tmp
+) -> None:
+    """Disabling a subscription removes the matching chip from a
+    subsequent list response. ECV is foundational and stays."""
+    org_id = seeded["org_id"]
+    await _subscribe(org_id, "compliance", enabled=True)
+    await _seed_completed_packet_with_coverage(
+        org_id=org_id, created_by=seeded["customer_admin_id"]
+    )
+
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+
+    first = await client.get(
+        "/api/packets",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert first.status_code == 200
+    first_apps = {row["app_id"] for row in first.json()[0]["coverage"]}
+    assert first_apps == {"ecv", "compliance"}
+
+    await _set_subscription_enabled(org_id, "compliance", enabled=False)
+
+    second = await client.get(
+        "/api/packets",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert second.status_code == 200
+    second_apps = {row["app_id"] for row in second.json()[0]["coverage"]}
+    assert second_apps == {"ecv"}
+
+    await _cleanup_packets(org_id)
