@@ -367,14 +367,40 @@ async def _classify_batch(
 # --- Grouping ---------------------------------------------------------------
 
 
+def _is_title_continuation(prev: str, nxt: str) -> bool:
+    """Return True when nxt is a sub-section/schedule of prev (or vice-versa).
+
+    Handles multi-schedule documents like:
+      "Form T-7"  →  "Form T-7 Schedule A"  →  True  (new is more specific)
+      "Form T-7 Schedule A"  →  "Form T-7"   →  True  (back to parent title)
+
+    Intentionally returns False for unrelated same-type docs:
+      "W-2 Wage Statement (2025)"  →  "W-2 Wage Statement (2024)"  →  False
+    """
+    p = (prev or "").strip()
+    n = (nxt or "").strip()
+    if p == n:
+        return True
+    # nxt is a more-specific sub-section of prev: prev is a prefix of nxt
+    if n.startswith(p + " ") or n.startswith(p + ",") or n.startswith(p + ":"):
+        return True
+    # nxt is the base/parent of prev: nxt is a prefix of prev
+    if p.startswith(n + " ") or p.startswith(n + ",") or p.startswith(n + ":"):
+        return True
+    return False
+
+
 def _group_into_documents(
     classifications: list[dict[str, Any]],
 ) -> list[ClassifiedDoc]:
     """Merge consecutive same-class pages into documents.
 
     We break a document whenever (a) the MISMO class changes, OR (b) the
-    class stays the same but the `doc_title` changes (e.g. two W-2s from
-    different years). Confidence rolls up as the mean of member pages.
+    class stays the same AND the titles are not hierarchically related
+    (e.g. two W-2s from different years). Schedule/section suffixes on the
+    same base title ("Form T-7 Schedule A", "Form T-7 Schedule B") are
+    treated as continuations of the same document. Confidence rolls up as
+    the mean of member pages.
     """
     docs: list[ClassifiedDoc] = []
     current: list[dict[str, Any]] = []
@@ -428,7 +454,10 @@ def _group_into_documents(
         last = current[-1]
         same_class = c["mismo_class"] == last["mismo_class"]
         same_title = (c.get("doc_title") or "") == (last.get("doc_title") or "")
-        if same_class and same_title:
+        title_cont = _is_title_continuation(
+            last.get("doc_title") or "", c.get("doc_title") or ""
+        )
+        if same_class and (same_title or title_cont):
             current.append(c)
         else:
             flush()
