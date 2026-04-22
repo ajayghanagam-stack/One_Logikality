@@ -947,10 +947,6 @@ function Dashboard({
               appIcon={meta.icon}
               missingDocs={g.missing_docs}
               onClose={() => setBlockedDialog(null)}
-              onUpload={() => {
-                setBlockedDialog(null);
-                onReupload();
-              }}
               onProceedAnyway={() => {
                 setProceedAnyway((prev) => ({ ...prev, [blockedDialog]: true }));
                 setBlockedDialog(null);
@@ -3185,26 +3181,21 @@ function AppLauncher({
 
 /**
  * Explains *why* an app is blocked: lists every missing MISMO doc with
- * the reason it's required, and offers two escapes — "Upload missing
- * documents" (routes back to the upload page) or "Proceed anyway"
+ * the reason it's required, and offers a single escape — "Proceed anyway"
  * (flags the session override so the launcher shows PARTIAL).
- *
- * Port of the demo's `components/shared/blocked-app-dialog.tsx`;
- * styling and copy preserved 1:1.
+ * Upload is intentionally omitted: the model assumes one complete packet.
  */
 function BlockedAppDialog({
   appName,
   appIcon,
   missingDocs,
   onClose,
-  onUpload,
   onProceedAnyway,
 }: {
   appName: string;
   appIcon: string;
   missingDocs: MissingDoc[];
   onClose: () => void;
-  onUpload: () => void;
   onProceedAnyway: () => void;
 }) {
   return (
@@ -3397,32 +3388,9 @@ function BlockedAppDialog({
         >
           <button
             type="button"
-            onClick={onUpload}
+            onClick={onProceedAnyway}
             style={{ ...ctaBtnStyle, width: "100%", padding: "12px 20px" }}
           >
-            Upload missing documents
-          </button>
-          <button
-            type="button"
-            onClick={onProceedAnyway}
-            style={{
-              width: "100%",
-              padding: "10px 20px",
-              fontSize: 13,
-              fontWeight: 600,
-              borderRadius: 8,
-              border: `1px solid ${chrome.border}`,
-              background: chrome.card,
-              color: chrome.mutedFg,
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 6,
-              fontFamily: typography.fontFamily.primary,
-            }}
-          >
-            <AlertIcon size={14} color={chrome.mutedFg} />
             Proceed anyway — results will be incomplete
           </button>
         </div>
