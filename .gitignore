@@ -37,6 +37,12 @@ coverage/
 storage/
 uploads/
 
+# Local test packets — keep these out of git (may contain real PII; some
+# exceed GitHub's 100 MB per-file limit). The brand guidelines PDF is
+# explicitly allowed through.
+docs/*.pdf
+!docs/Logikality_Brand_Guidelines.pdf
+
 # Database
 *.db
 *.sqlite

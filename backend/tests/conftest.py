@@ -14,13 +14,76 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.db import SessionLocal
 from app.main import app
+from app.models import Packet
 from app.security import hash_password
+from tests._canned_seed import seed_canned_ecv
+
+
+@pytest.fixture(autouse=True)
+def _stub_classify(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the real Gemini classifier with a no-op for the test suite.
+
+    Running the real Vertex call would (a) hit a paid external, (b)
+    require ADC auth on CI, and (c) produce non-deterministic
+    confidences. Returning an empty list means `_persist_findings`
+    writes zero documents — tests that need the canned inventory get
+    it via `_stub_validate`'s seed call (which writes both sections
+    and docs) or via their own direct inserts.
+    """
+
+    async def _empty(_packet_id):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr("app.pipeline.ecv_stub.classify_packet", _empty)
+
+
+@pytest.fixture(autouse=True)
+def _stub_extract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the real Gemini Pro extractor with a no-op for the test suite.
+
+    Same reasoning as `_stub_classify`. Skipping extraction leaves
+    `ecv_extractions` empty; tests that need extractions seed them
+    directly (see `tests/test_packet_extractions.py`).
+    """
+
+    async def _noop(_packet_id):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr("app.pipeline.ecv_stub.extract_packet", _noop)
+
+
+@pytest.fixture(autouse=True)
+def _stub_validate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the real Claude validator with a canned-seed writer.
+
+    The real `validate_packet` makes 13 Claude calls to grade the 58
+    checks; running it from tests is paid + non-deterministic + needs
+    an Anthropic key. We swap in a helper that seeds the canned
+    `ECV_SECTIONS` / `ECV_LINE_ITEMS` / `DOCUMENT_INVENTORY` rows
+    directly so tests predating the real pipeline keep their deterministic
+    assertions. Tests that specifically assert on validate behaviour
+    (e.g. `tests/test_validate.py`) monkeypatch this fixture off by
+    overriding `validate_packet` again inside the test.
+    """
+
+    async def _seed(packet_id):  # type: ignore[no-untyped-def]
+        async with SessionLocal() as session:
+            packet_org = (
+                await session.execute(select(Packet.org_id).where(Packet.id == packet_id))
+            ).scalar_one_or_none()
+            if packet_org is None:
+                return
+            await seed_canned_ecv(session, packet_id=packet_id, org_id=packet_org)
+            await session.commit()
+
+    monkeypatch.setattr("app.pipeline.ecv_stub.validate_packet", _seed)
 
 
 @pytest_asyncio.fixture

@@ -18,8 +18,9 @@ import { usePathname } from "next/navigation";
 
 import { chrome, logo, typography } from "@/lib/brand";
 import { useAuth, type Role } from "@/lib/auth";
+import { useLastPacketId } from "@/lib/last-packet";
 
-type Item = { href: string; label: string; icon?: string };
+type Item = { href: string; label: string; icon?: string; restoreLastPacket?: boolean };
 
 type NavSection = { heading: string; items: Item[] };
 
@@ -60,7 +61,15 @@ function sectionsFor(role: Role, orgSlug: string | null): NavSection[] {
       items: [
         { href: base, label: "Home", icon: "🏠" },
         { href: `${base}/upload`, label: "Upload", icon: "⬆️" },
-        { href: `${base}/ecv`, label: "ECV Dashboard", icon: "🔍" },
+        {
+          href: `${base}/ecv`,
+          label: "ECV Dashboard",
+          icon: "🔍",
+          // Sidebar hydrates the URL with ?packet=<last-opened> when the
+          // user has previously viewed a packet, so returning to the
+          // dashboard from anywhere is one click instead of "Home → pick".
+          restoreLastPacket: true,
+        },
       ],
     },
   ];
@@ -87,6 +96,11 @@ function sectionsFor(role: Role, orgSlug: string | null): NavSection[] {
 export function Sidebar() {
   const { user, logout } = useAuth();
   const pathname = usePathname();
+
+  // Last packet the user opened on the ECV page, persisted by that page
+  // on successful load. Subscribed so "ECV Dashboard" in the sidebar
+  // deep-links straight back to it without a round-trip through Home.
+  const lastPacketId = useLastPacketId(user?.org_slug);
 
   if (!user) return null;
 
@@ -132,10 +146,17 @@ export function Sidebar() {
               const active =
                 pathname === item.href ||
                 (pathname?.startsWith(item.href + "/") ?? false);
+              // Opt-in per item (today: ECV Dashboard) — append the
+              // stored packet id so the link re-opens the user's last
+              // packet instead of the empty state.
+              const href =
+                item.restoreLastPacket && lastPacketId
+                  ? `${item.href}?packet=${lastPacketId}`
+                  : item.href;
               return (
                 <Link
                   key={item.href}
-                  href={item.href}
+                  href={href}
                   style={navItemStyle(active)}
                 >
                   {item.icon ? (

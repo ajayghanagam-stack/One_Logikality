@@ -23,7 +23,12 @@ import { useEffect, useMemo, useState } from "react";
 import { ApiError, api } from "@/lib/api";
 import { MICRO_APPS } from "@/lib/apps";
 import { useAuth, useRequireRole } from "@/lib/auth";
-import { chrome, typography } from "@/lib/brand";
+import { chrome, colors as brand, typography } from "@/lib/brand";
+import {
+  clearLastPacketId,
+  useLastPacketId,
+  writeLastPacketId,
+} from "@/lib/last-packet";
 import { LOAN_PROGRAMS } from "@/lib/rules";
 
 /* ----- types ---------------------------------------------------------- */
@@ -43,16 +48,36 @@ type ProgramOverride = {
   overridden_at: string;
 };
 
+type ReviewState = "pending_manual_review" | "approved" | "rejected";
+
+type PacketReview = {
+  state: ReviewState;
+  notes: string | null;
+  transitioned_by: string | null;
+  transitioned_by_name: string | null;
+  transitioned_at: string;
+};
+
+type PacketFile = {
+  id: string;
+  filename: string;
+  size_bytes: number;
+  content_type: string;
+};
+
 type Packet = {
   id: string;
   declared_program_id: string;
+  scoped_app_ids: string[];
   status: string;
   current_stage: string | null;
   started_processing_at: string | null;
   completed_at: string | null;
   created_at: string;
+  files: PacketFile[];
   program_confirmation: ProgramConfirmation | null;
   program_override: ProgramOverride | null;
+  review: PacketReview | null;
 };
 
 type LineItem = {
@@ -61,6 +86,12 @@ type LineItem = {
   check: string;
   result: string;
   confidence: number;
+  // Empty array ⇒ "core ECV check, applies regardless of scope". Otherwise
+  // the set of micro-apps the check feeds.
+  app_ids: string[];
+  // Server-resolved against the packet's scope. Out-of-scope items render
+  // de-emphasized and don't drive section score / severity counts.
+  in_scope: boolean;
 };
 
 type Section = {
@@ -68,8 +99,21 @@ type Section = {
   section_number: number;
   name: string;
   weight: number;
+  // Scoped score (only in-scope items considered). `raw_score` is the
+  // original all-items mean, kept for audit UI hover.
   score: number;
+  raw_score: number;
+  in_scope: boolean;
   line_items: LineItem[];
+};
+
+type AppCoverage = {
+  app_id: string;
+  total_items: number;
+  passed_items: number;
+  review_items: number;
+  critical_items: number;
+  score: number;
 };
 
 type PageIssue = { type: string; detail: string; affected_page: number };
@@ -118,6 +162,7 @@ type EcvDashboard = {
   sections: Section[];
   documents: EcvDocument[];
   app_gating: AppGating[];
+  coverage: AppCoverage[];
 };
 
 /* ----- semantic palette (only tokens not in chrome) ------------------- */
@@ -149,10 +194,17 @@ export default function EcvPage() {
   const params = useParams<{ orgSlug: string }>();
   const orgSlug = params.orgSlug;
   const searchParams = useSearchParams();
-  const packetId = searchParams.get("packet");
+  const urlPacketId = searchParams.get("packet");
   const router = useRouter();
   const { ready } = useRequireRole(["customer_admin", "customer_user"], `/${orgSlug}`);
   const { token, user } = useAuth();
+
+  // When the URL omits `?packet=`, fall back to the last packet this
+  // browser opened for this org so the sidebar "ECV Dashboard" link
+  // returns to the user's last view in one click. If the stored id 404s
+  // we clear it (see the catch branch below).
+  const lastPacketId = useLastPacketId(orgSlug);
+  const packetId = urlPacketId ?? lastPacketId;
 
   const [data, setData] = useState<EcvDashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -164,9 +216,19 @@ export default function EcvPage() {
     (async () => {
       try {
         const payload = await api<EcvDashboard>(`/api/packets/${packetId}/ecv`, { token });
-        if (!cancelled) setData(payload);
+        if (cancelled) return;
+        setData(payload);
+        // Only persist on successful load so a 404 doesn't stamp a
+        // bogus id back into localStorage.
+        writeLastPacketId(orgSlug, packetId);
       } catch (err) {
         if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404 && !urlPacketId) {
+          // Stored packet no longer visible to this user — drop it and
+          // fall through to the empty state next render.
+          clearLastPacketId(orgSlug);
+          return;
+        }
         if (err instanceof ApiError && err.status === 409) {
           setError("ECV is still processing this packet. Check back in a moment.");
         } else if (err instanceof ApiError) {
@@ -179,7 +241,7 @@ export default function EcvPage() {
     return () => {
       cancelled = true;
     };
-  }, [ready, token, packetId, reloadTick]);
+  }, [ready, token, packetId, urlPacketId, orgSlug, reloadTick]);
 
   const refetch = () => setReloadTick((t) => t + 1);
 
@@ -189,10 +251,15 @@ export default function EcvPage() {
     return (
       <div style={{ maxWidth: 800 }}>
         <h1 style={titleStyle}>ECV Dashboard</h1>
-        <p style={emptyStyle}>Nothing to show yet. Upload a packet to see ECV results.</p>
-        <Link href={`/${orgSlug}/upload`} style={linkBtnStyle}>
-          Upload a packet
-        </Link>
+        <p style={emptyStyle}>Pick a packet from Home or upload a new one to see ECV results.</p>
+        <div style={{ display: "flex", gap: 10 }}>
+          <Link href={`/${orgSlug}`} style={linkBtnStyle}>
+            Back to Home
+          </Link>
+          <Link href={`/${orgSlug}/upload`} style={linkBtnStyle}>
+            Upload a packet
+          </Link>
+        </div>
       </div>
     );
   }
@@ -229,6 +296,7 @@ export default function EcvPage() {
       canOverride={user?.role === "customer_admin"}
       onReupload={() => router.push(`/${orgSlug}/upload`)}
       onOverrideChanged={refetch}
+      onReviewChanged={refetch}
     />
   );
 }
@@ -241,19 +309,104 @@ function Dashboard({
   canOverride,
   onReupload,
   onOverrideChanged,
+  onReviewChanged,
 }: {
   data: EcvDashboard;
   token: string | null;
   canOverride: boolean;
   onReupload: () => void;
   onOverrideChanged: () => void;
+  onReviewChanged: () => void;
 }) {
-  const { packet, summary, sections, documents, app_gating: appGating } = data;
+  const {
+    packet,
+    summary,
+    sections,
+    documents,
+    app_gating: appGating,
+    coverage,
+  } = data;
   const [tab, setTab] = useState<"documents" | "sections" | "review">("documents");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [reviewFilter, setReviewFilter] = useState<"all" | "critical" | "review">("all");
   const [overrideOpen, setOverrideOpen] = useState(false);
+  // Review-dialog state (US-8.3). `reviewDialog` holds the target
+  // transition being composed; `reviewBusy` guards the action-bar
+  // buttons against double-submits; `reviewError` surfaces 400/500s.
+  const [reviewDialog, setReviewDialog] = useState<ReviewState | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  // Export state (US-8.1 PDF / US-8.2 MISMO XML). The auth-carrying
+  // fetch returns a blob we hand to the browser via a synthetic anchor
+  // click. `exportBusy` holds the format currently being downloaded so
+  // only one button spins at a time; `exportError` surfaces on the
+  // sticky bar's status line.
+  const [exportBusy, setExportBusy] = useState<"pdf" | "mismo" | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const download = async (format: "pdf" | "mismo") => {
+    if (exportBusy) return;
+    setExportBusy(format);
+    setExportError(null);
+    try {
+      const res = await fetch(`/api/packets/${packet.id}/export/${format}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        let detail: string | undefined;
+        try {
+          const body = (await res.json()) as { detail?: string } | undefined;
+          detail = typeof body?.detail === "string" ? body.detail : undefined;
+        } catch {
+          // response wasn't JSON — fall through to generic message
+        }
+        throw new Error(detail ?? `Export failed (${res.status}).`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download =
+        format === "pdf"
+          ? `ecv-report-${packet.id.slice(0, 8)}.pdf`
+          : `ecv-mismo-${packet.id.slice(0, 8)}.xml`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(
+        err instanceof Error
+          ? err.message
+          : format === "pdf"
+            ? "Couldn't download PDF."
+            : "Couldn't download MISMO XML.",
+      );
+    } finally {
+      setExportBusy(null);
+    }
+  };
+
+  const submitReview = async (state: ReviewState, notes: string | null) => {
+    setReviewBusy(true);
+    setReviewError(null);
+    try {
+      await api(`/api/packets/${packet.id}/review`, {
+        method: "POST",
+        json: { state, notes },
+        token,
+      });
+      setReviewDialog(null);
+      onReviewChanged();
+    } catch (err) {
+      setReviewError(
+        err instanceof ApiError ? (err.detail ?? "Couldn't save review decision.") : "Couldn't save review decision.",
+      );
+    } finally {
+      setReviewBusy(false);
+    }
+  };
   // Gating UX state (US-5.2 / US-5.3). `blockedDialog` is the app
   // currently being inspected in the modal; `proceedAnyway` remembers
   // which blocked apps the user has explicitly chosen to open despite
@@ -266,9 +419,18 @@ function Dashboard({
   const effectiveProgram = LOAN_PROGRAMS[effectiveProgramId];
 
   const { itemsToReview, criticalItems, reviewItems } = useMemo(() => {
-    const flat = sections.flatMap((sec) =>
-      sec.line_items.map((it) => ({ ...it, sectionName: sec.name, sectionId: sec.section_number })),
-    );
+    // Only in-scope items drive the "items to review" list — out-of-scope
+    // checks are still visible inside Section Scores (for audit), but
+    // they're not the user's action list and shouldn't be counted as red.
+    const flat = sections
+      .flatMap((sec) =>
+        sec.line_items.map((it) => ({
+          ...it,
+          sectionName: sec.name,
+          sectionId: sec.section_number,
+        })),
+      )
+      .filter((it) => it.in_scope);
     const crit = flat.filter(
       (i) => severity(i.confidence, summary.critical_threshold, summary.confidence_threshold) === "critical",
     );
@@ -304,6 +466,16 @@ function Dashboard({
   const overall = summary.overall_score;
   const stat = scoreStatus(overall);
   const shortId = packet.id.slice(0, 8);
+  // Prefer the uploaded filename as the hero title — that's what users
+  // recognize. Multi-file packets show "<first> +N more"; a zero-file
+  // packet (shouldn't happen post-upload, but defensive) falls back to
+  // the short packet id.
+  const heroTitle =
+    packet.files.length === 0
+      ? `Packet ${shortId}`
+      : packet.files.length === 1
+        ? packet.files[0].filename
+        : `${packet.files[0].filename} +${packet.files.length - 1} more`;
   const uploaded = new Date(packet.created_at).toLocaleString();
 
   const toggleCategory = (cat: string) =>
@@ -356,9 +528,11 @@ function Dashboard({
                 color: chrome.charcoal,
                 lineHeight: 1.2,
                 fontFamily: typography.fontFamily.primary,
+                overflowWrap: "anywhere",
               }}
+              title={heroTitle}
             >
-              Packet {shortId}
+              {heroTitle}
             </h1>
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 13 }}>
               <HeroField
@@ -448,6 +622,15 @@ function Dashboard({
           }}
         />
       </section>
+
+      {/* Scope coverage. Tells the user which apps this packet was
+          scored against and the per-app roll-up, so "red" checks for
+          out-of-scope apps don't get conflated with real findings. */}
+      <CoverageCard
+        scope={packet.scoped_app_ids}
+        coverage={coverage}
+        sections={sections}
+      />
 
       {/* Downstream-app launcher (US-5.2 / US-5.3).
           Only renders when the org is subscribed to at least one app;
@@ -564,23 +747,73 @@ function Dashboard({
           <InfoIcon size={14} color={chrome.amber} />
           <div>
             <div style={{ fontSize: 12, fontWeight: 600, color: chrome.charcoal }}>
-              {overall >= summary.auto_approve_threshold ? "Auto-approval eligible" : "Manual review required"}
+              {packet.review
+                ? reviewStateLabel(packet.review.state)
+                : overall >= summary.auto_approve_threshold
+                  ? "Auto-approval eligible"
+                  : "Manual review required"}
             </div>
-            <div style={{ fontSize: 11, color: chrome.mutedFg }}>
-              Current score <strong style={{ color: chrome.charcoal }}>{overall}%</strong>{" "}
-              {overall >= summary.auto_approve_threshold ? "meets" : "is below"} the{" "}
-              <strong>{summary.auto_approve_threshold}%</strong> auto-approval threshold
+            <div style={{ fontSize: 11, color: exportError ? DESTRUCTIVE : chrome.mutedFg }}>
+              {exportError ? (
+                <>{exportError}</>
+              ) : packet.review ? (
+                <>
+                  {packet.review.transitioned_by_name ? (
+                    <>
+                      by{" "}
+                      <strong style={{ color: chrome.charcoal }}>
+                        {packet.review.transitioned_by_name}
+                      </strong>{" "}
+                    </>
+                  ) : null}
+                  · score{" "}
+                  <strong style={{ color: chrome.charcoal }}>{overall}%</strong>
+                </>
+              ) : (
+                <>
+                  Current score{" "}
+                  <strong style={{ color: chrome.charcoal }}>{overall}%</strong>{" "}
+                  {overall >= summary.auto_approve_threshold ? "meets" : "is below"} the{" "}
+                  <strong>{summary.auto_approve_threshold}%</strong> auto-approval threshold
+                </>
+              )}
             </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <button
-            disabled={overall < summary.auto_approve_threshold}
-            style={{ ...secondaryBtnStyle, opacity: overall < summary.auto_approve_threshold ? 0.4 : 1 }}
+            type="button"
+            disabled={
+              reviewBusy ||
+              overall < summary.auto_approve_threshold ||
+              packet.review?.state === "approved"
+            }
+            onClick={() => submitReview("approved", null)}
+            style={{
+              ...secondaryBtnStyle,
+              opacity:
+                reviewBusy ||
+                overall < summary.auto_approve_threshold ||
+                packet.review?.state === "approved"
+                  ? 0.4
+                  : 1,
+              cursor:
+                reviewBusy ||
+                overall < summary.auto_approve_threshold ||
+                packet.review?.state === "approved"
+                  ? "not-allowed"
+                  : "pointer",
+            }}
           >
-            Approve packet
+            {packet.review?.state === "approved" ? "Approved" : "Approve packet"}
           </button>
           <button
+            type="button"
+            disabled={reviewBusy || packet.review?.state === "rejected"}
+            onClick={() => {
+              setReviewError(null);
+              setReviewDialog("rejected");
+            }}
             style={{
               padding: "10px 18px",
               fontSize: 13,
@@ -589,16 +822,78 @@ function Dashboard({
               border: `1px solid ${DESTRUCTIVE}40`,
               background: "#fff",
               color: DESTRUCTIVE,
-              cursor: "pointer",
+              cursor:
+                reviewBusy || packet.review?.state === "rejected"
+                  ? "not-allowed"
+                  : "pointer",
+              opacity: packet.review?.state === "rejected" ? 0.5 : 1,
               fontFamily: typography.fontFamily.primary,
             }}
           >
-            Reject
+            {packet.review?.state === "rejected" ? "Rejected" : "Reject"}
           </button>
           <div style={{ width: 1, height: 28, background: chrome.border, margin: "0 4px" }} />
-          <button style={secondaryBtnStyle}>Export PDF</button>
-          <button onClick={onReupload} style={ctaBtnStyle}>
-            Upload new packet →
+          <button
+            type="button"
+            disabled={exportBusy !== null}
+            onClick={() => download("pdf")}
+            style={{
+              ...secondaryBtnStyle,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              opacity: exportBusy !== null ? 0.5 : 1,
+              cursor: exportBusy !== null ? "not-allowed" : "pointer",
+            }}
+          >
+            <DownloadIcon size={14} color="currentColor" />
+            {exportBusy === "pdf" ? "Exporting…" : "Export PDF"}
+          </button>
+          <button
+            type="button"
+            disabled={exportBusy !== null}
+            onClick={() => download("mismo")}
+            title="Download MISMO 3.6 XML for downstream integrations"
+            style={{
+              padding: "10px 16px",
+              fontSize: 13,
+              fontWeight: 600,
+              borderRadius: 8,
+              border: `1px solid ${brand.purple}`,
+              background: `${brand.purple}12`,
+              color: brand.purple,
+              cursor: exportBusy !== null ? "not-allowed" : "pointer",
+              opacity: exportBusy !== null ? 0.5 : 1,
+              fontFamily: typography.fontFamily.primary,
+            }}
+          >
+            {exportBusy === "mismo" ? "Exporting…" : "MISMO XML"}
+          </button>
+          <button type="button" style={secondaryBtnStyle} onClick={onReupload}>
+            Upload new packet
+          </button>
+          <button
+            type="button"
+            disabled={reviewBusy || packet.review?.state === "pending_manual_review"}
+            onClick={() => {
+              setReviewError(null);
+              setReviewDialog("pending_manual_review");
+            }}
+            style={{
+              ...ctaBtnStyle,
+              opacity:
+                reviewBusy || packet.review?.state === "pending_manual_review"
+                  ? 0.5
+                  : 1,
+              cursor:
+                reviewBusy || packet.review?.state === "pending_manual_review"
+                  ? "not-allowed"
+                  : "pointer",
+            }}
+          >
+            {packet.review?.state === "pending_manual_review"
+              ? "In manual review"
+              : "Send to manual review →"}
           </button>
         </div>
       </div>
@@ -614,6 +909,19 @@ function Dashboard({
             setOverrideOpen(false);
             onOverrideChanged();
           }}
+        />
+      )}
+
+      {reviewDialog && (
+        <ReviewDialog
+          state={reviewDialog}
+          busy={reviewBusy}
+          error={reviewError}
+          onCancel={() => {
+            setReviewDialog(null);
+            setReviewError(null);
+          }}
+          onSubmit={(notes) => submitReview(reviewDialog, notes)}
         />
       )}
 
@@ -893,6 +1201,109 @@ function DocumentRow({ doc }: { doc: EcvDocument }) {
   );
 }
 
+/* ----- coverage card -------------------------------------------------- */
+
+const COVERAGE_LABELS: Record<string, string> = {
+  ecv: "ECV",
+  "title-search": "Title Search",
+  "title-exam": "Title Examination",
+  compliance: "Compliance",
+  "income-calc": "Income Calculation",
+};
+
+function CoverageCard({
+  scope,
+  coverage,
+  sections,
+}: {
+  scope: string[];
+  coverage: AppCoverage[];
+  sections: Section[];
+}) {
+  // "Out of scope" summary — apps the user didn't pick that still have
+  // checks behind them. Drives the "N checks skipped" line underneath
+  // the per-app rows so users can see what they turned off.
+  const scopeSet = new Set(scope);
+  const outOfScope = sections
+    .flatMap((s) => s.line_items)
+    .filter((it) => !it.in_scope);
+
+  return (
+    <section style={coverageCardStyle}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          marginBottom: 10,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: chrome.charcoal }}>
+            Coverage
+          </div>
+          <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
+            Apps this packet was scored against. Out-of-scope checks stay
+            visible below but don&apos;t drive red.
+          </div>
+        </div>
+        {outOfScope.length > 0 ? (
+          <div style={{ fontSize: 11, color: chrome.mutedFg }}>
+            {outOfScope.length} out-of-scope check
+            {outOfScope.length === 1 ? "" : "s"} skipped
+          </div>
+        ) : null}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: 10,
+        }}
+      >
+        {coverage.map((row) => {
+          const stat = scoreStatus(row.score);
+          const label = COVERAGE_LABELS[row.app_id] ?? row.app_id;
+          const inScope = scopeSet.has(row.app_id);
+          return (
+            <div
+              key={row.app_id}
+              style={{
+                ...coveragePillStyle,
+                borderColor: inScope ? stat.bg : chrome.border,
+                opacity: inScope ? 1 : 0.65,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: chrome.charcoal }}>
+                  {label}
+                </div>
+                {row.app_id === "ecv" ? (
+                  <span style={coverageCorePillStyle}>CORE</span>
+                ) : null}
+              </div>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 4 }}>
+                <div style={{ fontSize: 20, fontWeight: 700, color: stat.color }}>
+                  {row.score.toFixed(0)}%
+                </div>
+                <div style={{ fontSize: 10, color: chrome.mutedFg }}>
+                  {row.total_items} check{row.total_items === 1 ? "" : "s"}
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 2 }}>
+                {row.passed_items} pass · {row.review_items} review ·{" "}
+                <span style={{ color: row.critical_items > 0 ? DESTRUCTIVE : chrome.mutedFg }}>
+                  {row.critical_items} critical
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 /* ----- sections tab --------------------------------------------------- */
 
 function SectionsTab({
@@ -918,7 +1329,15 @@ function SectionsTab({
         const isOpen = expanded === sec.section_number;
         const stat = scoreStatus(sec.score);
         return (
-          <div key={sec.id} style={{ borderBottom: `1px solid ${chrome.bg}` }}>
+          <div
+            key={sec.id}
+            style={{
+              borderBottom: `1px solid ${chrome.bg}`,
+              // Out-of-scope sections live in the tab (for audit / "what
+              // would change if I added this app?") but render muted.
+              opacity: sec.in_scope ? 1 : 0.55,
+            }}
+          >
             <div
               onClick={() => setExpanded(isOpen ? null : sec.section_number)}
               style={{
@@ -944,39 +1363,62 @@ function SectionsTab({
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>
                   {sec.name}
+                  {!sec.in_scope ? (
+                    <span style={outOfScopeBadgeStyle}>Out of scope</span>
+                  ) : null}
                 </div>
                 <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
                   {sec.line_items.length} check{sec.line_items.length === 1 ? "" : "s"} · weight{" "}
                   {(sec.weight * 100).toFixed(0)}%
+                  {!sec.in_scope
+                    ? " · not scored for this packet"
+                    : ""}
                 </div>
               </div>
               <div style={{ width: 160, flexShrink: 0 }}>
-                <Bar value={sec.score} color={stat.color} />
+                <Bar
+                  value={sec.in_scope ? sec.score : 0}
+                  color={sec.in_scope ? stat.color : chrome.mutedFg}
+                />
               </div>
               <div style={{ width: 90, textAlign: "right", flexShrink: 0 }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: stat.color }}>
-                  {sec.score.toFixed(0)}%
+                <div
+                  style={{
+                    fontSize: 16,
+                    fontWeight: 700,
+                    color: sec.in_scope ? stat.color : chrome.mutedFg,
+                  }}
+                >
+                  {sec.in_scope ? `${sec.score.toFixed(0)}%` : "—"}
                 </div>
                 <span
                   style={{
                     fontSize: 9,
                     fontWeight: 700,
-                    color: stat.color,
-                    background: stat.bg,
+                    color: sec.in_scope ? stat.color : chrome.mutedFg,
+                    background: sec.in_scope ? stat.bg : chrome.muted,
                     padding: "1px 6px",
                     borderRadius: 3,
                     letterSpacing: 0.4,
                   }}
                 >
-                  {stat.label}
+                  {sec.in_scope ? stat.label : "N/A"}
                 </span>
               </div>
             </div>
             {isOpen && (
               <div style={{ background: chrome.bg, padding: "4px 20px 14px 58px" }}>
                 {sec.line_items.map((it) => {
-                  const dot =
-                    it.confidence >= 90 ? SUCCESS : it.confidence >= 75 ? chrome.amber : DESTRUCTIVE;
+                  // Out-of-scope items get a muted dot + "N/A" status so
+                  // they don't read as red findings. In-scope items keep
+                  // the green/amber/red semantics.
+                  const dot = !it.in_scope
+                    ? chrome.mutedFg
+                    : it.confidence >= 90
+                      ? SUCCESS
+                      : it.confidence >= 75
+                        ? chrome.amber
+                        : DESTRUCTIVE;
                   return (
                     <div
                       key={it.id}
@@ -986,6 +1428,7 @@ function SectionsTab({
                         gap: 10,
                         padding: "8px 0",
                         borderBottom: `1px solid ${chrome.muted}`,
+                        opacity: it.in_scope ? 1 : 0.6,
                       }}
                     >
                       <span
@@ -1022,7 +1465,7 @@ function SectionsTab({
                           textAlign: "right",
                         }}
                       >
-                        {it.confidence}%
+                        {it.in_scope ? `${it.confidence}%` : "—"}
                       </span>
                     </div>
                   );
@@ -1438,6 +1881,16 @@ function XIcon({ size = 16, color = "currentColor" }: { size?: number; color?: s
   );
 }
 
+function DownloadIcon({ size = 16, color = "currentColor" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
 function InfoIcon({ size = 16, color = "currentColor" }: { size?: number; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1676,6 +2129,22 @@ function formatDate(iso: string): string {
     });
   } catch {
     return iso;
+  }
+}
+
+/**
+ * Human-readable label for a packet review state — used in the sticky
+ * action-bar status line once a decision has been recorded. Matches the
+ * three states the backend accepts (`POST /api/packets/{id}/review`).
+ */
+function reviewStateLabel(state: ReviewState): string {
+  switch (state) {
+    case "approved":
+      return "Approved";
+    case "rejected":
+      return "Rejected";
+    case "pending_manual_review":
+      return "In manual review";
   }
 }
 
@@ -2097,6 +2566,254 @@ function OverrideDialog({
   );
 }
 
+/* ----- review dialog (US-8.3) ---------------------------------------- */
+
+/**
+ * Composes the notes for a manual-review or rejection transition on a
+ * packet. Approval is a one-click action on the sticky bar and does not
+ * route through this dialog.
+ *
+ * Validation mirrors the backend (`POST /api/packets/{id}/review`):
+ * rejections require at least 8 characters of notes for the audit trail;
+ * manual-review notes are optional. Any 4xx/5xx from the API is
+ * surfaced inline via the `error` prop.
+ */
+function ReviewDialog({
+  state,
+  busy,
+  error,
+  onCancel,
+  onSubmit,
+}: {
+  state: ReviewState;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onSubmit: (notes: string | null) => void;
+}) {
+  const [notes, setNotes] = useState("");
+
+  const isReject = state === "rejected";
+  const isManual = state === "pending_manual_review";
+  const trimmed = notes.trim();
+  // Rejections require rationale (backend enforces ≥ 5 chars). Manual
+  // review notes are optional but encouraged.
+  const canSubmit = !busy && (!isReject || trimmed.length >= 5);
+
+  const heading = isReject
+    ? "Reject packet"
+    : isManual
+      ? "Send to manual review"
+      : "Record review decision";
+  const kicker = isReject
+    ? "Rejection — requires audit rationale"
+    : "Manual review — add optional context";
+  const cta = isReject ? "Reject packet" : "Send to manual review";
+  const placeholder = isReject
+    ? "e.g. Income documents show conflicts that can't be reconciled; borrower withdrew application."
+    : "e.g. Score below threshold — routing to senior underwriter for secondary review.";
+  const accent = isReject ? DESTRUCTIVE : chrome.amber;
+  const accentBg = isReject ? DESTRUCTIVE_BG : chrome.amberBg;
+  const accentDark = isReject ? DESTRUCTIVE : chrome.amberDark;
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(20,18,14,0.5)",
+        backdropFilter: "blur(4px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: chrome.card,
+          borderRadius: 14,
+          width: "100%",
+          maxWidth: 560,
+          maxHeight: "92vh",
+          overflow: "auto",
+          border: `1px solid ${chrome.border}`,
+          boxShadow: "0 24px 50px rgba(20,18,14,0.25)",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "20px 28px",
+            borderBottom: `1px solid ${chrome.border}`,
+            background: `linear-gradient(to right, ${accentBg}, ${accentBg}40)`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <div>
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: accentDark,
+                letterSpacing: 1,
+                textTransform: "uppercase",
+                marginBottom: 3,
+              }}
+            >
+              {kicker}
+            </div>
+            <h2
+              style={{
+                fontSize: 19,
+                fontWeight: 700,
+                margin: 0,
+                color: chrome.charcoal,
+                fontFamily: typography.fontFamily.primary,
+              }}
+            >
+              {heading}
+            </h2>
+          </div>
+          <button
+            onClick={onCancel}
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: 8,
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              color: chrome.mutedFg,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            aria-label="Close"
+          >
+            <XIcon size={16} color="currentColor" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "22px 28px" }}>
+          <div style={{ marginBottom: 18 }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: 11,
+                fontWeight: 700,
+                color: chrome.mutedFg,
+                letterSpacing: 0.6,
+                textTransform: "uppercase",
+                marginBottom: 8,
+              }}
+            >
+              Notes{" "}
+              {isReject ? (
+                <span style={{ color: DESTRUCTIVE }}>*</span>
+              ) : (
+                <span style={{ color: chrome.mutedFg, fontWeight: 500 }}>(optional)</span>
+              )}
+            </label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={placeholder}
+              rows={5}
+              style={{
+                width: "100%",
+                minHeight: 108,
+                padding: "10px 12px",
+                fontSize: 13,
+                fontFamily: "inherit",
+                border: `1px solid ${chrome.border}`,
+                borderRadius: 8,
+                background: chrome.card,
+                color: chrome.charcoal,
+                resize: "vertical",
+                boxSizing: "border-box",
+                lineHeight: 1.5,
+              }}
+            />
+            <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 5 }}>
+              {isReject
+                ? "Required — logged in the audit trail. Minimum 5 characters."
+                : "Shown to the reviewer who picks up this packet. Logged in the audit trail."}
+            </div>
+          </div>
+
+          {error && (
+            <div
+              role="alert"
+              style={{
+                marginBottom: 4,
+                padding: "10px 14px",
+                background: DESTRUCTIVE_BG,
+                border: `1px solid ${DESTRUCTIVE_BORDER}`,
+                borderRadius: 8,
+                fontSize: 12,
+                color: DESTRUCTIVE,
+              }}
+            >
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div
+          style={{
+            padding: "14px 28px",
+            borderTop: `1px solid ${chrome.border}`,
+            background: `${chrome.muted}80`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "flex-end",
+            gap: 8,
+          }}
+        >
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            style={{
+              ...secondaryBtnStyle,
+              padding: "9px 16px",
+              cursor: busy ? "not-allowed" : "pointer",
+              opacity: busy ? 0.6 : 1,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onSubmit(trimmed.length > 0 ? trimmed : null)}
+            disabled={!canSubmit}
+            style={{
+              padding: "9px 18px",
+              fontSize: 13,
+              fontWeight: 700,
+              borderRadius: 8,
+              border: "none",
+              background: accent,
+              color: "#fff",
+              cursor: canSubmit ? "pointer" : "not-allowed",
+              opacity: canSubmit ? 1 : 0.5,
+              fontFamily: typography.fontFamily.primary,
+            }}
+          >
+            {busy ? "Saving…" : cta}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ----- shared style constants ---------------------------------------- */
 
 const cardStyle: React.CSSProperties = {
@@ -2105,6 +2822,45 @@ const cardStyle: React.CSSProperties = {
   borderRadius: 10,
   boxShadow: "0 1px 2px rgba(20,18,14,0.03)",
   overflow: "hidden",
+};
+
+const coverageCardStyle: React.CSSProperties = {
+  background: chrome.card,
+  border: `1px solid ${chrome.border}`,
+  borderRadius: 10,
+  padding: "14px 18px",
+  marginBottom: 20,
+};
+
+const coveragePillStyle: React.CSSProperties = {
+  padding: "10px 12px",
+  border: `1px solid ${chrome.border}`,
+  borderRadius: 8,
+  background: chrome.bg,
+};
+
+const coverageCorePillStyle: React.CSSProperties = {
+  fontSize: 9,
+  fontWeight: 700,
+  color: chrome.amberDark,
+  background: chrome.amberBg,
+  border: `1px solid ${chrome.amberLight}`,
+  padding: "1px 5px",
+  borderRadius: 3,
+  letterSpacing: 0.4,
+};
+
+const outOfScopeBadgeStyle: React.CSSProperties = {
+  marginLeft: 8,
+  fontSize: 9,
+  fontWeight: 700,
+  color: chrome.mutedFg,
+  background: chrome.muted,
+  border: `1px solid ${chrome.border}`,
+  padding: "1px 6px",
+  borderRadius: 3,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
 };
 
 const titleStyle: React.CSSProperties = {
@@ -2193,6 +2949,24 @@ function AppLauncher({
   proceedAnyway: Record<string, boolean>;
   onBlockedClick: (appId: string) => void;
 }) {
+  // Pull orgSlug + packet id here so the launcher can deep-link to
+  // micro-app pages without threading routing through every ancestor.
+  const params = useParams<{ orgSlug: string }>();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const orgSlug = params.orgSlug;
+  const packetId = searchParams.get("packet") ?? "";
+
+  const routeForApp = (appId: string): string | null => {
+    if (appId === "compliance") return `/${orgSlug}/apps/compliance?packet=${packetId}`;
+    if (appId === "income-calc") return `/${orgSlug}/apps/income-calc?packet=${packetId}`;
+    if (appId === "title-search") return `/${orgSlug}/apps/title-search?packet=${packetId}`;
+    if (appId === "title-exam") return `/${orgSlug}/apps/title-exam?packet=${packetId}`;
+    // Other micro-apps ship in later slices; returning null keeps the
+    // tile visible but clicking is a no-op until those pages land.
+    return null;
+  };
+
   return (
     <section style={{ ...cardStyle, padding: 16, marginBottom: 20 }}>
       <div
@@ -2227,9 +3001,15 @@ function AppLauncher({
               type="button"
               disabled={g.app_id === "ecv"}
               onClick={() => {
-                if (isBlocked) onBlockedClick(g.app_id);
-                // READY / PARTIAL launch paths wire up when the
-                // downstream app pages land. No-op for now.
+                if (isBlocked) {
+                  onBlockedClick(g.app_id);
+                  return;
+                }
+                // READY / PARTIAL: route to the micro-app page if it
+                // exists. Apps without a page yet no-op — the tile
+                // stays visible so the subscription is acknowledged.
+                const href = routeForApp(g.app_id);
+                if (href) router.push(href);
               }}
               style={{
                 padding: "10px 12px",

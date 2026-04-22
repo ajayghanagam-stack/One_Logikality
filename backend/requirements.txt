@@ -25,11 +25,27 @@ bcrypt==4.0.1
 passlib[bcrypt]>=1.7
 
 # HTTP & file I/O
-httpx==0.27.2
+# httpx 0.28 pulled in transitively by anthropic>=0.40; pinning to match.
+httpx==0.28.1
 aiofiles==24.1.0
+
+# PDF export (US-8.1). Pure-Python; no system deps, no wkhtmltopdf / Chrome
+# shim to maintain. Good enough for a stakeholder-facing validation report
+# with tables + brand-coloured chrome.
+reportlab==4.2.5
 
 # Workflow orchestration
 temporalio>=1.7
+
+# AI providers (Phase 3 / Step 4 — ECV pipeline)
+# google-genai is Google's unified SDK for Gemini via both the Developer API
+# and Vertex AI; we only use the vertexai=True code path per CLAUDE.md.
+anthropic>=0.40
+google-genai>=0.3
+
+# PDF ingestion (page splitting + text extraction for the classify stage).
+# Form-OCR for scanned PDFs lands in M3 via Document AI.
+pypdf>=5.0
 
 # Test dependencies
 pytest>=9.0

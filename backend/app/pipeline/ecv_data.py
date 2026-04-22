@@ -1,15 +1,18 @@
-"""Deterministic canned ECV findings.
+"""Canned ECV seed data.
 
-Ported 1:1 from the `one-logikality-demo` reference (`lib/demo-data.ts`
--> `ECV_SECTIONS`, `ECV_LINE_ITEMS`, `DOCUMENT_INVENTORY`) so the
-dashboard reads the same numbers end-to-end. The ECV stub writes these
-rows to the `ecv_sections`, `ecv_line_items`, and `ecv_documents` tables
-during the `score` stage.
+Two roles live in this module, separated by whether the real pipeline
+still reads them:
 
-When the real Temporal ECV workflow lands it will replace the stub entry
-point but can keep this module around as the fallback / seed for
-development environments where running the full pipeline isn't
-practical.
+- `CONFIRMATION_BY_PROGRAM` is **production** — `_persist_findings`
+  stamps these verdicts onto the packet row for US-3.11 until the
+  program-confirmation pipeline replaces it with real AI analysis.
+
+- `ECV_SECTIONS`, `ECV_LINE_ITEMS`, `DOCUMENT_INVENTORY` are
+  **test-only** as of M4. The real classify / extract / validate stages
+  now produce their own section / line-item / document rows; these
+  tuples remain solely to let `tests/_canned_seed.py` seed a known
+  shape into tests that predate the real pipelines. Do not import
+  these names from production code — grep will catch it.
 """
 
 from __future__ import annotations

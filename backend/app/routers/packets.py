@@ -15,6 +15,7 @@ replaces the stub in a later slice.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -26,6 +27,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Response,
     UploadFile,
     status,
 )
@@ -36,10 +38,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.adapters.storage_local import get_storage
 from app.db import get_session
 from app.deps import require_customer_admin, require_customer_role
+from app.exports import render_ecv_mismo_xml, render_ecv_pdf
 from app.models import (
     APP_IDS,
+    REVIEW_STATES,
     AppSubscription,
     EcvDocument,
+    EcvExtraction,
     EcvLineItem,
     EcvSection,
     Packet,
@@ -88,9 +93,23 @@ class ProgramOverrideOut(BaseModel):
     overridden_at: datetime
 
 
+class PacketReviewOut(BaseModel):
+    """Packet review decision surfaced in the ECV action bar (US-8.3)."""
+
+    state: str
+    notes: str | None
+    transitioned_by: str | None
+    transitioned_by_name: str | None
+    transitioned_at: datetime
+
+
 class PacketOut(BaseModel):
     id: str
     declared_program_id: str
+    # Which micro-apps this packet was uploaded to be scored against.
+    # ECV is always included. Drives the ECV dashboard's coverage card
+    # and the out-of-scope collapse behavior.
+    scoped_app_ids: list[str]
     status: str
     # Pipeline-state triple (US-3.4). `current_stage` is one of the ids
     # in `PIPELINE_STAGES`; all three are NULL until the stub begins
@@ -105,6 +124,8 @@ class PacketOut(BaseModel):
     # until a customer admin changes the program away from declared.
     program_confirmation: ProgramConfirmationOut | None
     program_override: ProgramOverrideOut | None
+    # Review state (US-8.3). NULL until the customer records a decision.
+    review: PacketReviewOut | None
 
 
 def _extension(filename: str) -> str:
@@ -120,6 +141,11 @@ async def create_packet(
     background: BackgroundTasks,
     declared_program_id: Annotated[str, Form()],
     files: Annotated[list[UploadFile], File()],
+    # Comma-separated list of app ids this packet should be scored against.
+    # Optional: if omitted (older clients), we fall back to `ecv` only so
+    # the dashboard never shows out-of-scope red by default. The upload UI
+    # always sends an explicit list.
+    scoped_app_ids: Annotated[str | None, Form()] = None,
 ) -> PacketOut:
     if declared_program_id not in LOAN_PROGRAM_IDS:
         raise HTTPException(
@@ -131,11 +157,13 @@ async def create_packet(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="at least one file is required",
         )
+    scope_list = _parse_scope(scoped_app_ids)
 
     # Read everything before we touch the DB — if any file is oversized
     # or has a disallowed extension we reject cleanly with 400 and don't
-    # leave a half-built packet around.
-    buffered: list[tuple[UploadFile, bytes]] = []
+    # leave a half-built packet around. We also hash each file up front
+    # so the dedupe lookup below can compare sets of SHA256 digests.
+    buffered: list[tuple[UploadFile, bytes, str]] = []
     for upload in files:
         name = upload.filename or ""
         if _extension(name) not in _ALLOWED_EXTENSIONS:
@@ -154,24 +182,53 @@ async def create_packet(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"file too large: {name!r}",
             )
-        buffered.append((upload, data))
+        buffered.append((upload, data, hashlib.sha256(data).hexdigest()))
 
     # RLS guarantees org_id would be own-org anyway, but we set it
     # explicitly so the row is valid even when tests bypass RLS by
     # connecting as the postgres superuser.
     assert user.org_id is not None  # customer roles always carry an org
+
+    # Deterministic-dedupe: the real ECV pipeline calls Gemini / Claude,
+    # which drift across runs even at temperature=0. If the same user
+    # re-uploads an identical file set under the same program, return the
+    # existing completed packet so the dashboard stays stable and we
+    # don't burn tokens re-running classify / extract / validate.
+    incoming_hashes = sorted(h for _, _, h in buffered)
+    duplicate = await _find_duplicate_packet(
+        session,
+        declared_program_id=declared_program_id,
+        file_hashes=incoming_hashes,
+        scoped_app_ids=scope_list,
+    )
+    if duplicate is not None:
+        dup_files = (
+            (await session.execute(select(PacketFile).where(PacketFile.packet_id == duplicate.id)))
+            .scalars()
+            .all()
+        )
+        overrider_name = await _fetch_overrider_name(session, duplicate)
+        reviewer_name = await _fetch_reviewer_name(session, duplicate)
+        return _packet_out(
+            duplicate,
+            list(dup_files),
+            overrider_name=overrider_name,
+            reviewer_name=reviewer_name,
+        )
+
     packet = Packet(
         org_id=user.org_id,
         declared_program_id=declared_program_id,
         status="uploaded",
         created_by=user.id,
+        scoped_app_ids=scope_list,
     )
     session.add(packet)
     await session.flush()  # populate packet.id before child rows reference it
 
     storage = get_storage()
     file_rows: list[PacketFile] = []
-    for upload, data in buffered:
+    for upload, data, content_hash in buffered:
         file_id = uuid.uuid4()
         # Namespaced under org/packet so a single storage root can serve
         # every tenant without leaking keys; the file_id prefix makes
@@ -189,6 +246,7 @@ async def create_packet(
                 size_bytes=len(data),
                 content_type=upload.content_type or "application/octet-stream",
                 storage_key=key,
+                content_hash=content_hash,
             )
         )
     session.add_all(file_rows)
@@ -203,12 +261,215 @@ async def create_packet(
     return _packet_out(packet, file_rows)
 
 
+def _parse_scope(raw: str | None) -> list[str]:
+    """Parse the upload form's comma-separated scope into a validated list.
+
+    Rules:
+      - None / empty → ["ecv"] (safe default: only the foundational app).
+      - "ecv" is always forced in; callers can't opt out of it.
+      - Unknown ids are rejected with 400 so typos don't silently widen
+        or narrow scope.
+      - Order-independent and deduplicated.
+    """
+    if not raw or not raw.strip():
+        return ["ecv"]
+    parsed = [part.strip() for part in raw.split(",") if part.strip()]
+    for app_id in parsed:
+        if app_id not in APP_IDS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"unknown app id in scoped_app_ids: {app_id!r}",
+            )
+    scope_set = set(parsed)
+    scope_set.add("ecv")  # always in scope
+    return sorted(scope_set)
+
+
+async def _find_duplicate_packet(
+    session: AsyncSession,
+    *,
+    declared_program_id: str,
+    file_hashes: list[str],
+    scoped_app_ids: list[str],
+) -> Packet | None:
+    """Return a completed packet whose files match `file_hashes` exactly.
+
+    Scope is the caller's own org (enforced by RLS on the SELECT, which
+    runs under the request's tenant session), same `declared_program_id`
+    (different program = different rule baseline = legitimately
+    different run), AND same `scoped_app_ids` — changing scope means a
+    different set of checks count toward the score, so re-using a cached
+    packet from a different scope would misrepresent the outcome.
+
+    `file_hashes` is the sorted list of SHA256 digests on the incoming
+    upload. A match means "same multiset of file bytes", regardless of
+    order or original filenames.
+    """
+    if not file_hashes:
+        return None
+
+    # Candidate packets: completed, same program, owned by the caller's
+    # org (RLS), and with the same number of files as the incoming set.
+    # We narrow with a subquery on PacketFile so we don't scan every
+    # packet the org has uploaded.
+    candidate_rows = (
+        await session.execute(
+            select(Packet, PacketFile.content_hash)
+            .join(PacketFile, PacketFile.packet_id == Packet.id)
+            .where(
+                Packet.declared_program_id == declared_program_id,
+                Packet.status == "completed",
+                PacketFile.content_hash.in_(file_hashes),
+            )
+        )
+    ).all()
+    if not candidate_rows:
+        return None
+
+    # Group digests by packet so we can compare multisets.
+    hashes_by_packet: dict[uuid.UUID, list[str]] = {}
+    packet_by_id: dict[uuid.UUID, Packet] = {}
+    for packet, digest in candidate_rows:
+        hashes_by_packet.setdefault(packet.id, []).append(digest)
+        packet_by_id[packet.id] = packet
+
+    for packet_id in hashes_by_packet:
+        # A partial match on the join isn't enough — a candidate with
+        # extra files is a different upload. Re-query the full file set
+        # to be sure we compare the complete multiset, not just the
+        # overlapping hashes.
+        full_hashes = (
+            (
+                await session.execute(
+                    select(PacketFile.content_hash).where(PacketFile.packet_id == packet_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if sorted(full_hashes) != file_hashes:
+            continue
+        candidate = packet_by_id[packet_id]
+        if sorted(candidate.scoped_app_ids or []) != sorted(scoped_app_ids):
+            continue
+        return candidate
+    return None
+
+
+class ScopeOptionRow(BaseModel):
+    """One selectable app on the upload page's scope picker.
+
+    `subscribed` / `enabled` mirror the customer-admin /apps shape so the
+    upload form can reuse the same mental model. `enabled=false` options
+    are rendered disabled with a "Ask your admin to enable" hint.
+    """
+
+    app_id: str
+    subscribed: bool
+    enabled: bool
+
+
+@router.get("/scope-options", response_model=list[ScopeOptionRow])
+async def list_scope_options(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> list[ScopeOptionRow]:
+    """Which micro-apps the current org can scope a packet to.
+
+    Every customer role can read this (it's needed on the upload form,
+    which customer_user also has access to). Returns one row per known
+    app id in catalog order so the frontend never has to reconcile
+    missing rows.
+    """
+    subs = {
+        row.app_id: row
+        for row in (
+            await session.execute(
+                select(AppSubscription).where(AppSubscription.org_id == user.org_id)
+            )
+        )
+        .scalars()
+        .all()
+    }
+    return [
+        ScopeOptionRow(
+            app_id=app_id,
+            subscribed=app_id in subs,
+            enabled=subs[app_id].enabled if app_id in subs else False,
+        )
+        for app_id in APP_IDS
+    ]
+
+
+@router.get("", response_model=list[PacketOut])
+async def list_packets(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> list[PacketOut]:
+    """List packets for the current user's org, most-recent first.
+
+    RLS scopes the SELECT to the caller's org. Files + overrider/reviewer
+    names are bulk-loaded in two follow-up queries to avoid N+1.
+    """
+    packets = (
+        (await session.execute(select(Packet).order_by(Packet.created_at.desc()))).scalars().all()
+    )
+    if not packets:
+        return []
+
+    packet_ids = [p.id for p in packets]
+    file_rows = (
+        (await session.execute(select(PacketFile).where(PacketFile.packet_id.in_(packet_ids))))
+        .scalars()
+        .all()
+    )
+    files_by_packet: dict[uuid.UUID, list[PacketFile]] = {pid: [] for pid in packet_ids}
+    for f in file_rows:
+        files_by_packet[f.packet_id].append(f)
+
+    user_ids: set[uuid.UUID] = set()
+    for p in packets:
+        if p.program_overridden_by is not None:
+            user_ids.add(p.program_overridden_by)
+        if p.review_by_user_id is not None:
+            user_ids.add(p.review_by_user_id)
+    names_by_user: dict[uuid.UUID, str] = {}
+    if user_ids:
+        name_rows = (
+            await session.execute(select(User.id, User.full_name).where(User.id.in_(user_ids)))
+        ).all()
+        names_by_user = {uid: name for uid, name in name_rows}
+
+    return [
+        _packet_out(
+            p,
+            files_by_packet.get(p.id, []),
+            overrider_name=(
+                names_by_user.get(p.program_overridden_by)
+                if p.program_overridden_by is not None
+                else None
+            ),
+            reviewer_name=(
+                names_by_user.get(p.review_by_user_id) if p.review_by_user_id is not None else None
+            ),
+        )
+        for p in packets
+    ]
+
+
 class EcvLineItemOut(BaseModel):
     id: str
     item_code: str
     check: str
     result: str
     confidence: int
+    # Downstream apps this check feeds. NULL/empty means "core ECV check".
+    # Surfaced so the UI can label scope on hover / drill-down.
+    app_ids: list[str]
+    # Resolved against the packet's scope. Out-of-scope items are still
+    # returned (for audit / "what would change if I added this app?") but
+    # don't contribute to the section score or severity counts.
+    in_scope: bool
 
 
 class EcvSectionOut(BaseModel):
@@ -216,7 +477,15 @@ class EcvSectionOut(BaseModel):
     section_number: int
     name: str
     weight: int
+    # Score now computed from the in-scope line items only; this is the
+    # number displayed in the UI. `raw_score` preserves the original
+    # rollup (all items) for audit / debugging.
     score: float
+    raw_score: float
+    # A section is in-scope when it has at least one in-scope line item.
+    # Sections with zero in-scope items are rendered as "Not scored —
+    # out of scope for this packet" and do not contribute to overall_score.
+    in_scope: bool
     line_items: list[EcvLineItemOut]
 
 
@@ -280,12 +549,32 @@ class AppGatingOut(BaseModel):
     missing_docs: list[MissingDocOut]
 
 
+class AppCoverageOut(BaseModel):
+    """Per-app scoring coverage for this packet (in-scope apps only).
+
+    Computed from line items tagged with this app. `total_items` / `passed`
+    / `review` / `critical` are the same severity buckets used by the
+    global summary but scoped to one app so the Coverage card can render
+    "Title Exam — 8/8 in scope, 82% score" at a glance.
+    """
+
+    app_id: str
+    total_items: int
+    passed_items: int
+    review_items: int
+    critical_items: int
+    score: float
+
+
 class EcvDashboardOut(BaseModel):
     packet: PacketOut
     summary: EcvSummaryOut
     sections: list[EcvSectionOut]
     documents: list[EcvDocumentOut]
     app_gating: list[AppGatingOut]
+    # One row per app the packet is scoped to (always includes ECV).
+    # Empty if no line items exist yet (pre-score pipeline stages).
+    coverage: list[AppCoverageOut]
 
 
 # Severity thresholds are surfaced alongside the data so the frontend
@@ -305,6 +594,7 @@ def _packet_out(
     packet: Packet,
     files: list[PacketFile],
     overrider_name: str | None = None,
+    reviewer_name: str | None = None,
 ) -> PacketOut:
     """Serialize a Packet (+ files) into the wire shape.
 
@@ -338,9 +628,22 @@ def _packet_out(
             overridden_at=packet.program_overridden_at,
         )
 
+    review: PacketReviewOut | None = None
+    if packet.review_state is not None and packet.review_transitioned_at is not None:
+        review = PacketReviewOut(
+            state=packet.review_state,
+            notes=packet.review_notes,
+            transitioned_by=(
+                str(packet.review_by_user_id) if packet.review_by_user_id is not None else None
+            ),
+            transitioned_by_name=reviewer_name,
+            transitioned_at=packet.review_transitioned_at,
+        )
+
     return PacketOut(
         id=str(packet.id),
         declared_program_id=packet.declared_program_id,
+        scoped_app_ids=list(packet.scoped_app_ids or ["ecv"]),
         status=packet.status,
         current_stage=packet.current_stage,
         started_processing_at=packet.started_processing_at,
@@ -357,6 +660,7 @@ def _packet_out(
         ],
         program_confirmation=confirmation,
         program_override=override,
+        review=review,
     )
 
 
@@ -371,6 +675,19 @@ async def _fetch_overrider_name(session: AsyncSession, packet: Packet) -> str | 
         return None
     return (
         await session.execute(select(User.full_name).where(User.id == packet.program_overridden_by))
+    ).scalar_one_or_none()
+
+
+async def _fetch_reviewer_name(session: AsyncSession, packet: Packet) -> str | None:
+    """Look up the reviewer's full_name for the current review-state row.
+
+    Mirrors `_fetch_overrider_name` — returns None when the user row has
+    been deleted so the UI renders "by unknown user" without joining.
+    """
+    if packet.review_by_user_id is None:
+        return None
+    return (
+        await session.execute(select(User.full_name).where(User.id == packet.review_by_user_id))
     ).scalar_one_or_none()
 
 
@@ -427,7 +744,13 @@ async def set_packet_program_override(
         .all()
     )
     overrider_name = user.full_name  # we know who it is — the current user
-    return _packet_out(packet, list(files), overrider_name=overrider_name)
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+    return _packet_out(
+        packet,
+        list(files),
+        overrider_name=overrider_name,
+        reviewer_name=reviewer_name,
+    )
 
 
 @router.delete("/{packet_id}/program-override", response_model=PacketOut)
@@ -459,7 +782,87 @@ async def clear_packet_program_override(
         .scalars()
         .all()
     )
-    return _packet_out(packet, list(files), overrider_name=None)
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+    return _packet_out(
+        packet,
+        list(files),
+        overrider_name=None,
+        reviewer_name=reviewer_name,
+    )
+
+
+class PacketReviewIn(BaseModel):
+    """Body for `POST /api/packets/{id}/review` (US-8.3).
+
+    `state` is the target review state (`pending_manual_review` /
+    `approved` / `rejected`). `notes` is the rationale the underwriter
+    enters in the dialog; required for `rejected` (auditable reason for
+    a negative decision) and optional for the other two.
+    """
+
+    state: str
+    notes: str | None = None
+
+
+_MIN_REVIEW_NOTES_LENGTH = 5
+
+
+@router.post("/{packet_id}/review", response_model=PacketOut)
+async def set_packet_review(
+    packet_id: uuid.UUID,
+    body: PacketReviewIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> PacketOut:
+    """Record a review decision on the packet (US-8.3).
+
+    Any authenticated customer role can set the state — approve / reject
+    are the authoritative decisions, and "send to manual review" just
+    flags the packet for a second pair of eyes. Every transition
+    refreshes `review_transitioned_at` and replaces `review_by_user_id`,
+    so the audit trail always reflects the most recent actor.
+    """
+    if body.state not in REVIEW_STATES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown review state {body.state!r}",
+        )
+
+    notes = body.notes.strip() if body.notes is not None else None
+    if body.state == "rejected" and (notes is None or len(notes) < _MIN_REVIEW_NOTES_LENGTH):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "notes are required when rejecting a packet "
+                f"(min {_MIN_REVIEW_NOTES_LENGTH} characters)"
+            ),
+        )
+
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    packet.review_state = body.state
+    packet.review_notes = notes if notes else None
+    packet.review_by_user_id = user.id
+    packet.review_transitioned_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(packet)
+
+    files = (
+        (await session.execute(select(PacketFile).where(PacketFile.packet_id == packet_id)))
+        .scalars()
+        .all()
+    )
+    overrider_name = await _fetch_overrider_name(session, packet)
+    return _packet_out(
+        packet,
+        list(files),
+        overrider_name=overrider_name,
+        reviewer_name=user.full_name,
+    )
 
 
 @router.get("/{packet_id}", response_model=PacketOut)
@@ -483,7 +886,13 @@ async def get_packet(
         .all()
     )
     overrider_name = await _fetch_overrider_name(session, packet)
-    return _packet_out(packet, list(files), overrider_name=overrider_name)
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+    return _packet_out(
+        packet,
+        list(files),
+        overrider_name=overrider_name,
+        reviewer_name=reviewer_name,
+    )
 
 
 @router.get("/{packet_id}/ecv", response_model=EcvDashboardOut)
@@ -512,7 +921,13 @@ async def get_packet_ecv(
         .all()
     )
     overrider_name = await _fetch_overrider_name(session, packet)
-    packet_out = _packet_out(packet, list(files), overrider_name=overrider_name)
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+    packet_out = _packet_out(
+        packet,
+        list(files),
+        overrider_name=overrider_name,
+        reviewer_name=reviewer_name,
+    )
 
     # Findings aren't persisted until the stub reaches the `score`
     # stage. Before that, tell the client so it can show a "still
@@ -561,15 +976,36 @@ async def get_packet_ecv(
     for item in line_items:
         items_by_section.setdefault(item.section_id, []).append(item)
 
+    scope_set = set(packet.scoped_app_ids or ["ecv"])
+
+    def _item_in_scope(item: EcvLineItem) -> bool:
+        # Core checks (no app_ids tag) apply to every packet.
+        if not item.app_ids:
+            return True
+        return any(app_id in scope_set for app_id in item.app_ids)
+
+    # Build line-item outs once; reuse for severity + section score rollups.
+    in_scope_items: list[EcvLineItem] = [i for i in line_items if _item_in_scope(i)]
+
     section_outs: list[EcvSectionOut] = []
     for sec in sections:
+        sec_items = items_by_section.get(sec.id, [])
+        sec_in_scope_items = [i for i in sec_items if _item_in_scope(i)]
+        # Recompute score from in-scope items only. `sec.score` is the
+        # original all-items mean, preserved on the row as `raw_score`.
+        if sec_in_scope_items:
+            score = round(sum(i.confidence for i in sec_in_scope_items) / len(sec_in_scope_items))
+        else:
+            score = 0
         section_outs.append(
             EcvSectionOut(
                 id=str(sec.id),
                 section_number=sec.section_number,
                 name=sec.name,
                 weight=sec.weight,
-                score=float(sec.score),
+                score=float(score),
+                raw_score=float(sec.score),
+                in_scope=bool(sec_in_scope_items),
                 line_items=[
                     EcvLineItemOut(
                         id=str(i.id),
@@ -577,8 +1013,10 @@ async def get_packet_ecv(
                         check=i.check_description,
                         result=i.result_text,
                         confidence=i.confidence,
+                        app_ids=list(i.app_ids or []),
+                        in_scope=_item_in_scope(i),
                     )
-                    for i in items_by_section.get(sec.id, [])
+                    for i in sec_items
                 ],
             )
         )
@@ -607,17 +1045,26 @@ async def get_packet_ecv(
         for d in documents
     ]
 
-    # Weighted overall score — mirrors demo's rollup. Sections with
-    # weight 0 don't contribute; divide-by-zero is impossible unless the
-    # seed data is broken.
-    total_weight = sum(s.weight for s in sections)
+    # Weighted overall score — mirrors demo's rollup, but only sections
+    # that are in-scope contribute. An all-out-of-scope packet is
+    # impossible in practice (ECV core sections always in-scope), but the
+    # divide-by-zero guard is kept for robustness.
+    weighted_sections = [s for s in section_outs if s.in_scope]
+    total_weight = sum(s.weight for s in weighted_sections)
     overall_score = (
-        sum(float(s.score) * s.weight for s in sections) / total_weight if total_weight > 0 else 0.0
+        sum(s.score * s.weight for s in weighted_sections) / total_weight
+        if total_weight > 0
+        else 0.0
     )
 
-    critical = [i for i in line_items if i.confidence < _CRITICAL_THRESHOLD]
-    review = [i for i in line_items if _CRITICAL_THRESHOLD <= i.confidence < _CONFIDENCE_THRESHOLD]
-    passed = [i for i in line_items if i.confidence >= _CONFIDENCE_THRESHOLD]
+    # Severity counts reflect in-scope items only — same logic as overall
+    # score. Out-of-scope items still ship to the client (for the
+    # collapsed group), they just don't drive red in the header KPIs.
+    critical = [i for i in in_scope_items if i.confidence < _CRITICAL_THRESHOLD]
+    review = [
+        i for i in in_scope_items if _CRITICAL_THRESHOLD <= i.confidence < _CONFIDENCE_THRESHOLD
+    ]
+    passed = [i for i in in_scope_items if i.confidence >= _CONFIDENCE_THRESHOLD]
     missing_docs = sum(1 for d in documents if d.status == "missing")
 
     summary = EcvSummaryOut(
@@ -625,7 +1072,7 @@ async def get_packet_ecv(
         auto_approve_threshold=_AUTO_APPROVE_THRESHOLD,
         confidence_threshold=_CONFIDENCE_THRESHOLD,
         critical_threshold=_CRITICAL_THRESHOLD,
-        total_items=len(line_items),
+        total_items=len(in_scope_items),
         passed_items=len(passed),
         review_items=len(review),
         critical_items=len(critical),
@@ -633,6 +1080,7 @@ async def get_packet_ecv(
         documents_missing=missing_docs,
     )
 
+    coverage = _compute_coverage(scope_set, line_items)
     app_gating = await _compute_app_gating(session, packet.org_id, documents)
 
     return EcvDashboardOut(
@@ -641,6 +1089,355 @@ async def get_packet_ecv(
         sections=section_outs,
         documents=document_outs,
         app_gating=app_gating,
+        coverage=coverage,
+    )
+
+
+def _compute_coverage(
+    scope_set: set[str],
+    line_items: list[EcvLineItem],
+) -> list[AppCoverageOut]:
+    """Build per-app coverage rows for every app in the packet's scope.
+
+    For each app in `scope_set`, count the checks that feed it (either
+    tagged with the app id, or core/untagged which apply to every app).
+    The severity buckets and mean-score are useful for the Coverage card's
+    "Title Exam — 8 checks, 82% score" summary.
+    """
+    rows: list[AppCoverageOut] = []
+    for app_id in sorted(scope_set):
+        app_items = [
+            i
+            for i in line_items
+            if not i.app_ids  # core checks count for every app
+            or app_id in i.app_ids
+        ]
+        if not app_items:
+            rows.append(
+                AppCoverageOut(
+                    app_id=app_id,
+                    total_items=0,
+                    passed_items=0,
+                    review_items=0,
+                    critical_items=0,
+                    score=0.0,
+                )
+            )
+            continue
+        passed = sum(1 for i in app_items if i.confidence >= _CONFIDENCE_THRESHOLD)
+        review = sum(
+            1 for i in app_items if _CRITICAL_THRESHOLD <= i.confidence < _CONFIDENCE_THRESHOLD
+        )
+        critical = sum(1 for i in app_items if i.confidence < _CRITICAL_THRESHOLD)
+        score = round(sum(i.confidence for i in app_items) / len(app_items), 1)
+        rows.append(
+            AppCoverageOut(
+                app_id=app_id,
+                total_items=len(app_items),
+                passed_items=passed,
+                review_items=review,
+                critical_items=critical,
+                score=score,
+            )
+        )
+    return rows
+
+
+class EcvExtractionOut(BaseModel):
+    """One MISMO 3.6 field extraction with page-level evidence (US-7.3 / 7.4)."""
+
+    id: str
+    mismo_path: str
+    entity: str
+    field: str
+    value: str
+    confidence: int
+    page_number: int | None
+    snippet: str | None
+
+
+class EcvDocumentExtractionsOut(BaseModel):
+    """Extractions grouped under the document they were read from.
+
+    `document_id` / `doc_number` / `name` / `mismo_type` mirror the
+    `EcvDocumentOut` keys so the MISMO panel can render entity rollups
+    without a second round trip. The `unassigned` bucket carries rows
+    where `document_id` is NULL (the parent doc was re-classified after
+    the extraction ran; see migration 0016's SET NULL rationale).
+    """
+
+    document_id: str | None
+    doc_number: int | None
+    name: str | None
+    mismo_type: str | None
+    extractions: list[EcvExtractionOut]
+
+
+class EcvExtractionsOut(BaseModel):
+    packet_id: str
+    documents: list[EcvDocumentExtractionsOut]
+
+
+@router.get("/{packet_id}/extractions", response_model=EcvExtractionsOut)
+async def get_packet_extractions(
+    packet_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> EcvExtractionsOut:
+    """Return every MISMO 3.6 extraction for a packet, grouped by document.
+
+    Powers the MISMO panel (US-7.3) and evidence panel (US-7.4). Returns
+    an empty `documents` list rather than 404 when extraction hasn't run
+    yet — the panel just renders its empty state; the dashboard's 409 on
+    `/ecv` is the correct signal that the packet is still processing.
+    RLS scopes every query so a 404 covers both "doesn't exist" and
+    "not yours" without leaking existence across tenants.
+    """
+    packet = (
+        await session.execute(select(Packet.id).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    documents = (
+        (
+            await session.execute(
+                select(EcvDocument)
+                .where(EcvDocument.packet_id == packet_id)
+                .order_by(EcvDocument.doc_number)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    extractions = (
+        (
+            await session.execute(
+                select(EcvExtraction)
+                .where(EcvExtraction.packet_id == packet_id)
+                .order_by(EcvExtraction.mismo_path)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    by_document: dict[uuid.UUID | None, list[EcvExtraction]] = {}
+    for e in extractions:
+        by_document.setdefault(e.document_id, []).append(e)
+
+    def _ser(e: EcvExtraction) -> EcvExtractionOut:
+        return EcvExtractionOut(
+            id=str(e.id),
+            mismo_path=e.mismo_path,
+            entity=e.entity,
+            field=e.field,
+            value=e.value,
+            confidence=e.confidence,
+            page_number=e.page_number,
+            snippet=e.snippet,
+        )
+
+    groups: list[EcvDocumentExtractionsOut] = []
+    for doc in documents:
+        rows = by_document.pop(doc.id, [])
+        if not rows:
+            continue
+        groups.append(
+            EcvDocumentExtractionsOut(
+                document_id=str(doc.id),
+                doc_number=doc.doc_number,
+                name=doc.name,
+                mismo_type=doc.mismo_type,
+                extractions=[_ser(r) for r in rows],
+            )
+        )
+
+    # Anything left is keyed on a document_id that no longer exists or is
+    # NULL (SET NULL after re-classification). Surface it explicitly so
+    # the UI can still render the data under an "Unassigned" heading.
+    orphaned = by_document.get(None, [])
+    for doc_id, rows in by_document.items():
+        if doc_id is None:
+            continue
+        orphaned.extend(rows)
+    if orphaned:
+        groups.append(
+            EcvDocumentExtractionsOut(
+                document_id=None,
+                doc_number=None,
+                name=None,
+                mismo_type=None,
+                extractions=[_ser(r) for r in orphaned],
+            )
+        )
+
+    return EcvExtractionsOut(packet_id=str(packet_id), documents=groups)
+
+
+@router.get("/{packet_id}/export/pdf")
+async def export_packet_pdf(
+    packet_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> Response:
+    """Return the ECV validation report as a PDF (US-8.1).
+
+    Loads the same objects `GET /api/packets/{id}/ecv` returns and hands
+    them to the rendering module. RLS scopes every query, so a 404
+    covers both "doesn't exist" and "not yours" — identical to the
+    dashboard endpoint. 409 when the stub hasn't reached the `score`
+    stage yet, because a PDF with no findings is worse than no PDF.
+    """
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    sections = (
+        (
+            await session.execute(
+                select(EcvSection)
+                .where(EcvSection.packet_id == packet_id)
+                .order_by(EcvSection.section_number)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not sections:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ECV findings not ready yet",
+        )
+
+    line_items = (
+        (
+            await session.execute(
+                select(EcvLineItem)
+                .where(EcvLineItem.packet_id == packet_id)
+                .order_by(EcvLineItem.item_code)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    documents = (
+        (
+            await session.execute(
+                select(EcvDocument)
+                .where(EcvDocument.packet_id == packet_id)
+                .order_by(EcvDocument.doc_number)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    overrider_name = await _fetch_overrider_name(session, packet)
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+
+    pdf_bytes = render_ecv_pdf(
+        packet=packet,
+        sections=sections,
+        line_items=line_items,
+        documents=documents,
+        overrider_name=overrider_name,
+        reviewer_name=reviewer_name,
+    )
+
+    short_id = str(packet.id)[:8]
+    filename = f"ecv-report-{short_id}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/{packet_id}/export/mismo")
+async def export_packet_mismo(
+    packet_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> Response:
+    """Return the ECV payload as MISMO 3.6 XML (US-8.2).
+
+    Shares query plumbing with the PDF endpoint — same RLS guarantees
+    (404 on cross-org), same 409 when findings haven't landed yet, same
+    serialization of the ORM objects into the renderer. Media type is
+    `application/xml`; browsers treat that as a download with the
+    Content-Disposition below.
+    """
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    sections = (
+        (
+            await session.execute(
+                select(EcvSection)
+                .where(EcvSection.packet_id == packet_id)
+                .order_by(EcvSection.section_number)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not sections:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ECV findings not ready yet",
+        )
+
+    line_items = (
+        (
+            await session.execute(
+                select(EcvLineItem)
+                .where(EcvLineItem.packet_id == packet_id)
+                .order_by(EcvLineItem.item_code)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    documents = (
+        (
+            await session.execute(
+                select(EcvDocument)
+                .where(EcvDocument.packet_id == packet_id)
+                .order_by(EcvDocument.doc_number)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+
+    xml_bytes = render_ecv_mismo_xml(
+        packet=packet,
+        sections=sections,
+        line_items=line_items,
+        documents=documents,
+        reviewer_name=reviewer_name,
+    )
+
+    short_id = str(packet.id)[:8]
+    filename = f"ecv-mismo-{short_id}.xml"
+    return Response(
+        content=xml_bytes,
+        media_type="application/xml",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

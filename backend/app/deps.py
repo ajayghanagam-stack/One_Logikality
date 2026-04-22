@@ -11,6 +11,7 @@ the handler typed access to the user row without an extra query.
 from __future__ import annotations
 
 import uuid
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -19,6 +20,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.adapters.llm import LLMAdapter
+from app.adapters.llm_anthropic import AnthropicLLMAdapter
+from app.adapters.llm_vertex import VertexLLMAdapter
+from app.config import settings
 from app.db import get_session, set_tenant_context
 from app.models import User
 from app.security import InvalidTokenError, decode_token
@@ -125,3 +130,29 @@ async def require_customer_role(
             detail="customer role required",
         )
     return user
+
+
+# --- LLM adapters ------------------------------------------------------------
+# Singletons: one client per process. `lru_cache` gives us lazy instantiation
+# plus idempotent reuse across requests. Call-site injects via FastAPI Depends.
+
+
+@lru_cache(maxsize=1)
+def get_vertex_adapter() -> LLMAdapter:
+    if not settings.google_cloud_project:
+        raise RuntimeError(
+            "GOOGLE_CLOUD_PROJECT is not set — configure it in .env before using Vertex AI models."
+        )
+    return VertexLLMAdapter(
+        project=settings.google_cloud_project,
+        location=settings.google_cloud_region,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_anthropic_adapter() -> LLMAdapter:
+    if not settings.anthropic_api_key:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set — configure it in .env before using Claude models."
+        )
+    return AnthropicLLMAdapter(api_key=settings.anthropic_api_key)

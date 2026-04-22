@@ -56,6 +56,18 @@ class Settings(BaseSettings):
         alias="AI_PROVIDER", default="claude"
     )
 
+    # Anthropic (validation + reasoning — Claude Sonnet)
+    anthropic_api_key: str | None = Field(alias="ANTHROPIC_API_KEY", default=None)
+    anthropic_model: str = Field(alias="ANTHROPIC_MODEL", default="claude-sonnet-4-6")
+
+    # Google Vertex AI (classification + extraction — Gemini 2.5 Flash / Pro)
+    # Auth is via Application Default Credentials, not an API key — run
+    # `gcloud auth application-default login` or set GOOGLE_APPLICATION_CREDENTIALS.
+    google_cloud_project: str | None = Field(alias="GOOGLE_CLOUD_PROJECT", default=None)
+    google_cloud_region: str = Field(alias="GOOGLE_CLOUD_REGION", default="us-central1")
+    vertex_classify_model: str = Field(alias="VERTEX_CLASSIFY_MODEL", default="gemini-2.5-flash")
+    vertex_extract_model: str = Field(alias="VERTEX_EXTRACT_MODEL", default="gemini-2.5-pro")
+
 
 settings = Settings()  # type: ignore[call-arg]
 

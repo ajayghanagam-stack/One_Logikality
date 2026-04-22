@@ -14,7 +14,7 @@
  * dashboard (US-3.4).
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { PipelineProgress } from "@/components/pipeline-progress";
@@ -22,6 +22,34 @@ import { ApiError } from "@/lib/api";
 import { useAuth, useRequireRole } from "@/lib/auth";
 import { chrome, typography } from "@/lib/brand";
 import { LOAN_PROGRAMS } from "@/lib/rules";
+
+// Label + blurb for each scope option. Kept in this file (not imported
+// from a shared module) because it's the only place the upload page
+// needs display metadata; micro-app pages render their own headers.
+const SCOPE_LABELS: Record<string, { label: string; blurb: string }> = {
+  ecv: {
+    label: "ECV",
+    blurb: "Foundational extraction & validation — always included",
+  },
+  "title-search": {
+    label: "Title Search",
+    blurb: "Chain of title, lien search",
+  },
+  "title-exam": {
+    label: "Title Examination",
+    blurb: "ALTA Schedule B/C, curative workflow",
+  },
+  compliance: {
+    label: "Compliance",
+    blurb: "TRID / TILA / RESPA checks, fee tolerance",
+  },
+  "income-calc": {
+    label: "Income Calculation",
+    blurb: "DTI, income trending, reserves",
+  },
+};
+
+type ScopeOption = { app_id: string; subscribed: boolean; enabled: boolean };
 
 type QueuedFile = { file: File; id: string };
 
@@ -48,6 +76,14 @@ export default function UploadPage() {
   const [programId, setProgramId] = useState<string>("conventional");
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [scopeOptions, setScopeOptions] = useState<ScopeOption[]>([]);
+  // Selected scope — always includes "ecv" (foundational). Defaults to
+  // every enabled downstream app so legacy behavior (score every check)
+  // is the one-click path; users uploading a packet focused on a single
+  // app uncheck the rest.
+  const [scopeSelected, setScopeSelected] = useState<Set<string>>(
+    () => new Set(["ecv"]),
+  );
   // Non-null once `POST /api/packets` succeeds — drives the
   // full-screen `<PipelineProgress>` overlay which polls server state
   // and routes to the ECV dashboard on completion.
@@ -57,10 +93,55 @@ export default function UploadPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Fetch the org's scope options once and pre-select every enabled
+  // downstream app. Pre-selection preserves legacy behavior — score
+  // every applicable check — while the UI makes narrowing cheap.
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/packets/scope-options", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const payload: ScopeOption[] = await res.json();
+        if (cancelled) return;
+        setScopeOptions(payload);
+        setScopeSelected(
+          new Set([
+            "ecv",
+            ...payload
+              .filter((o) => o.enabled && o.app_id !== "ecv")
+              .map((o) => o.app_id),
+          ]),
+        );
+      } catch {
+        // Scope picker degrades to ECV-only if the endpoint is unreachable;
+        // the upload still works. No user-facing error here.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
   if (!ready) return null;
 
   const program = LOAN_PROGRAMS[programId];
   const totalBytes = queued.reduce((s, q) => s + q.file.size, 0);
+
+  function toggleScope(appId: string) {
+    // ECV is foundational and can't be unchecked — mirrors the backend
+    // rule that "ecv" is always forced into scoped_app_ids.
+    if (appId === "ecv") return;
+    setScopeSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(appId)) next.delete(appId);
+      else next.add(appId);
+      return next;
+    });
+  }
 
   function addFiles(list: FileList | File[]) {
     const incoming = Array.from(list).filter((f) => ACCEPT_RE.test(f.name));
@@ -85,6 +166,13 @@ export default function UploadPage() {
     try {
       const body = new FormData();
       body.set("declared_program_id", programId);
+      // Comma-separated list the backend parses into scoped_app_ids.
+      // "ecv" is always present; the backend also enforces this as
+      // defense-in-depth.
+      body.set(
+        "scoped_app_ids",
+        Array.from(scopeSelected).sort().join(","),
+      );
       for (const q of queued) body.append("files", q.file, q.file.name);
 
       const res = await fetch("/api/packets", {
@@ -172,6 +260,12 @@ export default function UploadPage() {
       ) : null}
 
       <ProgramPanel programId={programId} onChange={setProgramId} />
+
+      <ScopePanel
+        options={scopeOptions}
+        selected={scopeSelected}
+        onToggle={toggleScope}
+      />
 
       {submitError ? (
         <div role="alert" style={errorStyle}>
@@ -436,6 +530,91 @@ function ProgramPanel({
   );
 }
 
+function ScopePanel({
+  options,
+  selected,
+  onToggle,
+}: {
+  options: ScopeOption[];
+  selected: Set<string>;
+  onToggle: (appId: string) => void;
+}) {
+  // When the scope-options fetch hasn't returned yet (or failed), fall
+  // back to the known catalog so the user still sees the picker. ECV
+  // is always present, others appear unavailable/disabled.
+  const rows: ScopeOption[] =
+    options.length > 0
+      ? options
+      : Object.keys(SCOPE_LABELS).map((app_id) => ({
+          app_id,
+          subscribed: app_id === "ecv",
+          enabled: app_id === "ecv",
+        }));
+
+  return (
+    <div style={scopeCardStyle}>
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: chrome.charcoal }}>
+          Scope for this packet
+        </div>
+        <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
+          Which apps should ECV score this packet against? Checks outside
+          your selected scope stay visible but don&apos;t drive the overall
+          score or severity counts.
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {rows.map((o) => {
+          const meta = SCOPE_LABELS[o.app_id] ?? {
+            label: o.app_id,
+            blurb: "",
+          };
+          const isEcv = o.app_id === "ecv";
+          const isChecked = selected.has(o.app_id) || isEcv;
+          const isLocked = isEcv;
+          const isDisabled = !o.enabled && !isEcv;
+          return (
+            <label
+              key={o.app_id}
+              style={{
+                ...scopeRowStyle,
+                opacity: isDisabled ? 0.55 : 1,
+                cursor: isLocked || isDisabled ? "not-allowed" : "pointer",
+                background: isChecked ? chrome.amberBg : chrome.card,
+                borderColor: isChecked ? chrome.amberLight : chrome.border,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={isChecked}
+                disabled={isLocked || isDisabled}
+                onChange={() => onToggle(o.app_id)}
+                style={{ marginTop: 2 }}
+              />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>
+                  {meta.label}
+                  {isLocked ? (
+                    <span style={scopeLockedBadgeStyle}>Required</span>
+                  ) : null}
+                  {isDisabled ? (
+                    <span style={scopeDisabledBadgeStyle}>
+                      {o.subscribed ? "Not enabled" : "Not subscribed"}
+                    </span>
+                  ) : null}
+                </div>
+                <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 1 }}>
+                  {meta.blurb}
+                </div>
+              </div>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /* ----- helpers ------------------------------------------------------- */
 
 function orgDisplay(fullName: string): string {
@@ -619,4 +798,48 @@ const errorStyle: React.CSSProperties = {
   padding: "8px 12px",
   fontSize: 12,
   marginBottom: 12,
+};
+
+const scopeCardStyle: React.CSSProperties = {
+  background: chrome.card,
+  border: `1px solid ${chrome.border}`,
+  borderRadius: 10,
+  padding: "16px 18px",
+  marginBottom: 16,
+};
+
+const scopeRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 10,
+  padding: "10px 12px",
+  borderRadius: 8,
+  border: `1px solid ${chrome.border}`,
+  transition: "all 0.15s",
+};
+
+const scopeLockedBadgeStyle: React.CSSProperties = {
+  marginLeft: 8,
+  fontSize: 9,
+  fontWeight: 700,
+  color: chrome.amberDark,
+  background: chrome.amberBg,
+  border: `1px solid ${chrome.amberLight}`,
+  padding: "1px 6px",
+  borderRadius: 4,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
+};
+
+const scopeDisabledBadgeStyle: React.CSSProperties = {
+  marginLeft: 8,
+  fontSize: 9,
+  fontWeight: 700,
+  color: chrome.mutedFg,
+  background: chrome.muted,
+  border: `1px solid ${chrome.border}`,
+  padding: "1px 6px",
+  borderRadius: 4,
+  letterSpacing: 0.4,
+  textTransform: "uppercase",
 };
