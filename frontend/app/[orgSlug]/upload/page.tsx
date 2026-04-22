@@ -225,6 +225,8 @@ export default function UploadPage() {
         Upload your mortgage document packet for ECV analysis
       </p>
 
+      <ProgramPanel programId={programId} onChange={setProgramId} />
+
       <Dropzone
         dragActive={dragActive}
         onClick={() => inputRef.current?.click()}
@@ -258,8 +260,6 @@ export default function UploadPage() {
           onRemove={removeQueued}
         />
       ) : null}
-
-      <ProgramPanel programId={programId} onChange={setProgramId} />
 
       <ScopePanel
         options={scopeOptions}
