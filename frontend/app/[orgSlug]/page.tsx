@@ -34,6 +34,15 @@ type PacketFileRow = {
   content_type: string;
 };
 
+type AppCoverageRow = {
+  app_id: string;
+  total_items: number;
+  passed_items: number;
+  review_items: number;
+  critical_items: number;
+  score: number;
+};
+
 type PacketRow = {
   id: string;
   declared_program_id: string;
@@ -43,7 +52,30 @@ type PacketRow = {
   completed_at: string | null;
   created_at: string;
   files: PacketFileRow[];
+  // Per-app score chips for whichever apps the packet was scoped to
+  // and the org currently has subscribed+enabled. NULL until the
+  // pipeline produces line items (i.e. the packet has scores).
+  coverage: AppCoverageRow[] | null;
 };
+
+// Mirrors the COVERAGE_LABELS map on the ECV detail page so chips
+// here use the same human-friendly app names as the drill-down view.
+const COVERAGE_LABELS: Record<string, string> = {
+  ecv: "ECV",
+  "title-search": "Title Search",
+  "title-exam": "Title Examination",
+  compliance: "Compliance",
+  "income-calc": "Income Calculation",
+};
+
+// Same thresholds used by the ECV detail page's `scoreStatus` — kept
+// duplicated here (rather than imported) because the home dashboard
+// shouldn't pull in the entire ecv page module just for the colors.
+function coverageChipColors(score: number): { fg: string; bg: string; border: string } {
+  if (score >= 90) return { fg: "#065F46", bg: "#D1FAE5", border: "#A7F3D0" };
+  if (score >= 75) return { fg: chrome.amberDark, bg: chrome.amberBg, border: chrome.amber };
+  return { fg: "#991B1B", bg: "#FEE2E2", border: "#FCA5A5" };
+}
 
 export default function TenantLanding() {
   const { user, hydrated, token } = useAuth();
@@ -264,6 +296,28 @@ function PacketRowItem({
         <div style={{ color: chrome.mutedFg, fontSize: 12 }}>
           {programLabel} · uploaded {created}
         </div>
+        {packet.coverage && packet.coverage.length > 0 ? (
+          <div style={coverageStripStyle}>
+            {packet.coverage.map((row) => {
+              const colors = coverageChipColors(row.score);
+              const label = COVERAGE_LABELS[row.app_id] ?? row.app_id;
+              return (
+                <span
+                  key={row.app_id}
+                  title={`${row.passed_items} pass · ${row.review_items} review · ${row.critical_items} critical`}
+                  style={{
+                    ...coverageChipStyle,
+                    color: colors.fg,
+                    background: colors.bg,
+                    borderColor: colors.border,
+                  }}
+                >
+                  {label} {row.score.toFixed(1)}%
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
         {deleteError && (
           <div style={{ fontSize: 11, color: "#991B1B", marginTop: 2 }}>{deleteError}</div>
         )}
@@ -384,6 +438,25 @@ const errorBoxStyle: React.CSSProperties = {
   border: "1px solid #FCA5A5",
   borderRadius: 8,
   fontSize: 13,
+};
+
+const coverageStripStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  marginTop: 4,
+};
+
+const coverageChipStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  padding: "2px 8px",
+  borderRadius: 999,
+  border: "1px solid",
+  fontSize: 11,
+  fontWeight: 600,
+  whiteSpace: "nowrap",
+  lineHeight: 1.4,
 };
 
 const deleteIconBtnStyle: React.CSSProperties = {

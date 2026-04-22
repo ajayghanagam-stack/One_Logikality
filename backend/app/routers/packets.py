@@ -117,6 +117,23 @@ class PacketReviewOut(BaseModel):
     transitioned_at: datetime
 
 
+class AppCoverageOut(BaseModel):
+    """Per-app scoring coverage for this packet (in-scope apps only).
+
+    Computed from line items tagged with this app. `total_items` / `passed`
+    / `review` / `critical` are the same severity buckets used by the
+    global summary but scoped to one app so the Coverage card can render
+    "Title Exam — 8/8 in scope, 82% score" at a glance.
+    """
+
+    app_id: str
+    total_items: int
+    passed_items: int
+    review_items: int
+    critical_items: int
+    score: float
+
+
 class PacketOut(BaseModel):
     id: str
     declared_program_id: str
@@ -140,6 +157,13 @@ class PacketOut(BaseModel):
     program_override: ProgramOverrideOut | None
     # Review state (US-8.3). NULL until the customer records a decision.
     review: PacketReviewOut | None
+    # Per-app score chips for the home dashboard. Only populated by the
+    # list endpoint (and only for completed packets that actually have
+    # line items); detail endpoints leave it None and rely on the
+    # dedicated `coverage` field on EcvDashboardOut. Same per-app
+    # filtering rules as the ECV detail Coverage card: each non-ECV chip
+    # averages only items tagged for that app; ECV is the catch-all.
+    coverage: list[AppCoverageOut] | None = None
 
 
 def _extension(filename: str) -> str:
@@ -454,6 +478,42 @@ async def list_packets(
         ).all()
         names_by_user = {uid: name for uid, name in name_rows}
 
+    # Bulk-load line items for every packet so we can compute the per-app
+    # coverage chips in one round-trip instead of N. Only completed packets
+    # carry meaningful items, but selecting across the full set keeps the
+    # query simple — uncompleted packets just produce empty buckets.
+    line_item_rows = (
+        (
+            await session.execute(
+                select(EcvLineItem).where(EcvLineItem.packet_id.in_(packet_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items_by_packet: dict[uuid.UUID, list[EcvLineItem]] = {pid: [] for pid in packet_ids}
+    for item in line_item_rows:
+        items_by_packet[item.packet_id].append(item)
+
+    # Same gating logic as the ECV detail Coverage card: only show chips
+    # for apps the org currently has both subscribed AND enabled. ECV is
+    # foundational and always included. This means a customer admin
+    # disabling an app immediately drops its chip from the home list with
+    # no extra reprocessing.
+    assert user.org_id is not None
+    enabled_subs = {
+        row.app_id
+        for row in (
+            await session.execute(
+                select(AppSubscription).where(
+                    AppSubscription.org_id == user.org_id,
+                    AppSubscription.enabled.is_(True),
+                )
+            )
+        ).scalars()
+    }
+    enabled_subs.add("ecv")
+
     return [
         _packet_out(
             p,
@@ -466,9 +526,32 @@ async def list_packets(
             reviewer_name=(
                 names_by_user.get(p.review_by_user_id) if p.review_by_user_id is not None else None
             ),
+            coverage=_packet_coverage_for_list(
+                p, items_by_packet.get(p.id, []), enabled_subs
+            ),
         )
         for p in packets
     ]
+
+
+def _packet_coverage_for_list(
+    packet: Packet,
+    line_items: list[EcvLineItem],
+    enabled_subs: set[str],
+) -> list[AppCoverageOut] | None:
+    """Compute per-app coverage chips for the home dashboard packet list.
+
+    Returns None when there's nothing meaningful to show yet (no line
+    items — i.e. the pipeline hasn't produced scores for this packet),
+    so the frontend can cleanly skip rendering chips for in-flight or
+    failed packets without a "0%" placeholder.
+    """
+    if not line_items:
+        return None
+    scope_set = set(packet.scoped_app_ids or ["ecv"])
+    coverage_scope = scope_set & enabled_subs
+    coverage_scope.add("ecv")  # always foundational
+    return _compute_coverage(coverage_scope, line_items)
 
 
 class EcvLineItemOut(BaseModel):
@@ -579,23 +662,6 @@ class AppGatingOut(BaseModel):
     missing_docs: list[MissingDocOut]
 
 
-class AppCoverageOut(BaseModel):
-    """Per-app scoring coverage for this packet (in-scope apps only).
-
-    Computed from line items tagged with this app. `total_items` / `passed`
-    / `review` / `critical` are the same severity buckets used by the
-    global summary but scoped to one app so the Coverage card can render
-    "Title Exam — 8/8 in scope, 82% score" at a glance.
-    """
-
-    app_id: str
-    total_items: int
-    passed_items: int
-    review_items: int
-    critical_items: int
-    score: float
-
-
 class EcvDashboardOut(BaseModel):
     packet: PacketOut
     summary: EcvSummaryOut
@@ -625,6 +691,7 @@ def _packet_out(
     files: list[PacketFile],
     overrider_name: str | None = None,
     reviewer_name: str | None = None,
+    coverage: list[AppCoverageOut] | None = None,
 ) -> PacketOut:
     """Serialize a Packet (+ files) into the wire shape.
 
@@ -691,6 +758,7 @@ def _packet_out(
         program_confirmation=confirmation,
         program_override=override,
         review=review,
+        coverage=coverage,
     )
 
 
