@@ -137,10 +137,22 @@ function PacketList({
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
-    (async () => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    async function fetchOnce() {
       try {
         const rows = await api<PacketRow[]>("/api/packets", { token });
-        if (!cancelled) setPackets(rows);
+        if (cancelled) return;
+        setPackets(rows);
+        // Keep polling while any packet is still non-terminal so newly
+        // available coverage chips and status pills appear without a
+        // manual refresh.
+        const hasPending = rows.some(
+          (p) => p.status !== "completed" && p.status !== "failed",
+        );
+        if (hasPending) {
+          timer = setTimeout(fetchOnce, 4000);
+        }
       } catch (err) {
         if (cancelled) return;
         setError(
@@ -149,9 +161,12 @@ function PacketList({
             : "Couldn't load packets.",
         );
       }
-    })();
+    }
+
+    fetchOnce();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [token]);
 
