@@ -1287,14 +1287,12 @@ function CoverageCard({
         {coverage.map((row) => {
           const stat = scoreStatus(row.score);
           const label = COVERAGE_LABELS[row.app_id] ?? row.app_id;
-          const inScope = scopeSet.has(row.app_id);
           return (
             <div
               key={row.app_id}
               style={{
                 ...coveragePillStyle,
-                borderColor: inScope ? stat.bg : chrome.border,
-                opacity: inScope ? 1 : 0.65,
+                borderColor: stat.bg,
               }}
             >
               <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
