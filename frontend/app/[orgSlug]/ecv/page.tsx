@@ -376,19 +376,15 @@ function Dashboard({
 
   return (
     <div style={{ paddingBottom: 32 }}>
-      {/* Hero + launcher side-by-side */}
-      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", marginBottom: 20 }}>
       {/* Hero */}
       <section
         style={{
           ...cardStyle,
           padding: 0,
-          marginBottom: 0,
+          marginBottom: 20,
           overflow: "hidden",
           position: "relative",
           borderTop: `3px solid ${chrome.amber}`,
-          width: 390,
-          flexShrink: 0,
         }}
       >
         <div
@@ -544,16 +540,13 @@ function Dashboard({
           Only renders when the org is subscribed to at least one app;
           otherwise there's nothing to launch and the panel is a visual
           dead weight. */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        {appGating.length > 0 && (
-          <AppLauncher
-            gating={appGating}
-            proceedAnyway={proceedAnyway}
-            onBlockedClick={(appId) => setBlockedDialog(appId)}
-          />
-        )}
-      </div>
-      </div>{/* end hero+launcher row */}
+      {appGating.length > 0 && (
+        <AppLauncher
+          gating={appGating}
+          proceedAnyway={proceedAnyway}
+          onBlockedClick={(appId) => setBlockedDialog(appId)}
+        />
+      )}
 
 
 
@@ -2656,7 +2649,7 @@ function AppLauncher({
   };
 
   return (
-    <section style={{ ...cardStyle, padding: 16, marginBottom: 0, height: "100%" }}>
+    <section style={{ ...cardStyle, padding: 16, marginBottom: 20 }}>
       <div
         style={{
           fontSize: 10,
