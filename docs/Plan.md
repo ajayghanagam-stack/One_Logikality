@@ -2,9 +2,48 @@
 
 Functional-requirements breakdown derived from analysis of the `one-logikality-demo` reference implementation, grouped into logical delivery phases (foundational → advanced). Each phase is independently shippable and builds on prior phases.
 
-> **Note:** File paths below refer to the demo reference codebase (`../one-logikality-demo`) and are included as structural pointers for the production build in this `One_Logikality` project.
+> **Note:** File paths below refer to the demo reference codebase (`../one-logikality-demo`) and are included as structural pointers for the production build in this `One_Logikality` project. For the **actual** file paths in this repo, see the "Code map" section of [CLAUDE.md](../CLAUDE.md).
 
 > **Multi-tenancy is foundational, not an add-on.** Every tenant-scoped table carries `org_id`; Postgres RLS keyed on `org_id` is enforced from day one (see [TechStack.md §4](./TechStack.md)). The three-persona permission model (platform admin / customer admin / customer user) applies to every UI surface and every API endpoint.
+
+---
+
+## Status snapshot (2026-04-22)
+
+A newcomer reading this doc should calibrate phases against the current code, not assume the plan == the state.
+
+| Phase | Status | Notes |
+|---|---|---|
+| **0** Dev env & scaffolding | shipped | `./start-dev.sh` brings the full stack up |
+| **1** Platform foundation & multi-tenant | shipped | Dual-portal login, platform-admin CRUD, RLS on `org_id` |
+| **2** Customer org admin | shipped | Users / apps / configuration / profile pages |
+| **3** Ingestion & ECV core | shipped | Real Vertex (Flash/Pro) + Anthropic (Sonnet) pipeline; 13 sections, 90% threshold, loan-program confirmation |
+| **4** Rule & config system | shipped | `getEffectiveRules`, three-tier layering, `ConfigApplied` badges |
+| **5** App gating & cross-app deps | shipped | Required-docs mapping, blocked-app dialog, MISMO-keyed cross-app refs |
+| **6** Downstream micro-apps | shipped | All four: Compliance, Income Calc, Title Search, Title Exam |
+| **7** AI transparency & MISMO | shipped *(with caveat)* | Primitives inlined in each app page, not extracted to `components/shared/` |
+| **8** Export & reporting | shipped | PDF + MISMO 3.6 XML renderers per app; send-to-manual-review live |
+
+**Shipped beyond the original plan:**
+
+- **Per-packet scope** (`scoped_app_ids`) — upload-time picker controls which micro-apps the packet is scored against; ECV overall score, section scores, and severity counts recompute from in-scope items only, with out-of-scope checks rendered muted. Migration `0018`.
+- **Content-hash file dedupe** — uploads are SHA256'd; identical bytes with identical scope return the existing packet. Migration `0017`.
+- **Pipeline LLM-call parallelization** — classify batches, extract docs, and validate sections fan out via `asyncio.gather` bounded by per-stage semaphores. 70-page packet: ~10 min → ~2–3 min wall-clock.
+- **Packet review state** — `EcvLineItem` carries per-item review decisions. Migration `0014`.
+
+**Still TODO:**
+
+- Replace `ecv_stub.py` BackgroundTask orchestrator with the Temporal workflow (worker already scaffolded)
+- Real auth/RBAC — demo still uses seed credentials + hardcoded platform admin
+- Vertex Document AI for image-only PDFs (current pipeline uses pypdf text; scans are skipped)
+- Replace the frontend `demo-store` React Context where it still persists state in-memory
+
+### Phase 7 caveat (read before touching transparency UI)
+
+The plan called for five reusable shared components under `components/shared/`:
+`AiNote`, `AiRecommendation`, `MismoPanel`, `EvidencePanel`, `ReviewDialog`.
+
+What shipped: each micro-app page (`app/[orgSlug]/apps/*/page.tsx`) defines its own variant inline (e.g. `AiNoteCallout`, `EvidencePanel`). Functional parity, but the reuse pattern the plan assumed doesn't exist yet. Treat this as technical debt — the third time you find yourself copying a variant, extract.
 
 ---
 
