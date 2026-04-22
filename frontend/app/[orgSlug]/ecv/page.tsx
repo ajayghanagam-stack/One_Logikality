@@ -593,9 +593,6 @@ function Dashboard({
             >
               {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
             </div>
-            <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 220 }}>
-              Weighted across {sections.filter((s) => s.drives_score).length} selected-app section{sections.filter((s) => s.drives_score).length === 1 ? "" : "s"}
-            </div>
             <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
               {summary.passed_items} passed · {summary.review_items} flagged · {summary.critical_items} critical
               {summary.total_items > 0 ? (
