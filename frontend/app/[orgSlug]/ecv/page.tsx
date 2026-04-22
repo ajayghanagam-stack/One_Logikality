@@ -20,6 +20,7 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+import { PipelineProgress } from "@/components/pipeline-progress";
 import { ApiError, api } from "@/lib/api";
 import { MICRO_APPS } from "@/lib/apps";
 import { useAuth, useRequireRole } from "@/lib/auth";
@@ -331,6 +332,17 @@ function Dashboard({
   const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
   const [reviewFilter, setReviewFilter] = useState<"all" | "critical" | "review">("all");
   const [overrideOpen, setOverrideOpen] = useState(false);
+  const [isReprocessing, setIsReprocessing] = useState(false);
+
+  const handleReprocess = async () => {
+    if (!token) return;
+    try {
+      await api(`/api/packets/${packet.id}/reprocess`, { method: "POST", token });
+      setIsReprocessing(true);
+    } catch {
+      // silently ignore — keep the UI stable
+    }
+  };
   // Review-dialog state (US-8.3). `reviewDialog` holds the target
   // transition being composed; `reviewBusy` guards the action-bar
   // buttons against double-submits; `reviewError` surfaces 400/500s.
@@ -555,6 +567,7 @@ function Dashboard({
                 }
                 canChange={canOverride}
                 onChange={() => setOverrideOpen(true)}
+                onReprocess={canOverride ? handleReprocess : undefined}
               />
             </div>
           </div>
@@ -897,6 +910,17 @@ function Dashboard({
           </button>
         </div>
       </div>
+
+      {isReprocessing && token && (
+        <PipelineProgress
+          packetId={packet.id}
+          token={token}
+          onComplete={() => {
+            setIsReprocessing(false);
+            onOverrideChanged();
+          }}
+        />
+      )}
 
       {overrideOpen && (
         <OverrideDialog
@@ -1931,6 +1955,7 @@ function ConfirmationPill({
   suggestedProgramLabel,
   canChange,
   onChange,
+  onReprocess,
 }: {
   confirmation: ProgramConfirmation | null;
   override: ProgramOverride | null;
@@ -1938,6 +1963,7 @@ function ConfirmationPill({
   suggestedProgramLabel: string | null;
   canChange: boolean;
   onChange: () => void;
+  onReprocess?: () => void;
 }) {
   // Overridden trumps pipeline confirmation — when a human has decided,
   // show their decision + the audit trail.
@@ -1952,6 +1978,7 @@ function ConfirmationPill({
         canChange={canChange}
         changeLabel="Change again"
         onChange={onChange}
+        onReprocess={onReprocess}
       />
     );
   }
@@ -2028,6 +2055,7 @@ function PillShell({
   canChange,
   changeLabel,
   onChange,
+  onReprocess,
 }: {
   tone: "success" | "destructive" | "amber" | "muted";
   icon: React.ReactNode;
@@ -2037,6 +2065,7 @@ function PillShell({
   canChange: boolean;
   changeLabel: string;
   onChange: () => void;
+  onReprocess?: () => void;
 }) {
   const palette = {
     success: { bg: SUCCESS_BG, border: SUCCESS_BORDER, fg: "#065F46" },
@@ -2094,25 +2123,56 @@ function PillShell({
         )}
       </div>
       {canChange && (
-        <button
-          onClick={onChange}
-          style={{
-            flexShrink: 0,
-            padding: "6px 12px",
-            fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
-            background: "#fff",
-            color: chrome.amberDark,
-            border: `1px solid ${chrome.amberLight}`,
-            borderRadius: 14,
-            cursor: "pointer",
-            fontFamily: typography.fontFamily.primary,
-          }}
-        >
-          {changeLabel}
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+          <button
+            onClick={onChange}
+            style={{
+              padding: "6px 12px",
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 0.4,
+              textTransform: "uppercase",
+              background: "#fff",
+              color: chrome.amberDark,
+              border: `1px solid ${chrome.amberLight}`,
+              borderRadius: 14,
+              cursor: "pointer",
+              fontFamily: typography.fontFamily.primary,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {changeLabel}
+          </button>
+          {onReprocess && (
+            <button
+              onClick={onReprocess}
+              title="Re-run the ECV pipeline with the current program"
+              style={{
+                padding: "6px 12px",
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: 0.4,
+                textTransform: "uppercase",
+                background: "#fff",
+                color: chrome.amberDark,
+                border: `1px solid ${chrome.amberLight}`,
+                borderRadius: 14,
+                cursor: "pointer",
+                fontFamily: typography.fontFamily.primary,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                whiteSpace: "nowrap",
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              Reprocess
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

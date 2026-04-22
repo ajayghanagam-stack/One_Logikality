@@ -32,7 +32,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.storage_local import get_storage
@@ -787,6 +787,58 @@ async def clear_packet_program_override(
         packet,
         list(files),
         overrider_name=None,
+        reviewer_name=reviewer_name,
+    )
+
+
+@router.post("/{packet_id}/reprocess", response_model=PacketOut)
+async def reprocess_packet(
+    packet_id: uuid.UUID,
+    background: BackgroundTasks,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_admin)],
+) -> PacketOut:
+    """Reset a completed packet and re-run the ECV pipeline from scratch.
+
+    Clears all derived ECV data (sections, line items, documents,
+    extractions) and resets the packet back to `pending` so the pipeline
+    stub can run again — useful after a loan-program override changes
+    which rule-set applies to the packet.
+    """
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    # Clear all ECV derived data — cascades handle line items / extractions
+    # that hang off sections and documents respectively.
+    await session.execute(delete(EcvSection).where(EcvSection.packet_id == packet_id))
+    await session.execute(delete(EcvDocument).where(EcvDocument.packet_id == packet_id))
+    await session.execute(delete(EcvExtraction).where(EcvExtraction.packet_id == packet_id))
+
+    # Reset packet to pending so the stub can walk through its stages again.
+    packet.status = "pending"
+    packet.current_stage = None
+    packet.started_processing_at = None
+    packet.completed_at = None
+
+    await session.commit()
+    await session.refresh(packet)
+
+    background.add_task(run_ecv_stub, packet_id)
+
+    files = (
+        (await session.execute(select(PacketFile).where(PacketFile.packet_id == packet_id)))
+        .scalars()
+        .all()
+    )
+    overrider_name = await _fetch_overrider_name(session, packet)
+    reviewer_name = await _fetch_reviewer_name(session, packet)
+    return _packet_out(
+        packet,
+        list(files),
+        overrider_name=overrider_name,
         reviewer_name=reviewer_name,
     )
 
