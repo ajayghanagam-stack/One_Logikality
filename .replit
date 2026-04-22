@@ -15,6 +15,8 @@ PIPELINE_BACKEND = "background_tasks"
 AI_PROVIDER = "hybrid"
 TEMPORAL_ADDRESS = "localhost:7234"
 API_ORIGIN = "http://localhost:8000"
+GOOGLE_CLOUD_PROJECT = "project-4a624631-3837-408e-81b"
+GOOGLE_CLOUD_REGION = "us-central1"
 
 [workflows]
 runButton = "Project"
