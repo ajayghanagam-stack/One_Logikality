@@ -31,7 +31,34 @@ Multi-tenant SaaS platform for mortgage document processing. Fullstack app with 
 The original `start-dev.sh` script is preserved for local development with Docker. It expects a `.venv` in `backend/` and runs Postgres + Temporal via `docker-compose.yml`.
 
 ## Seeding Demo Data
-To seed demo data into the database:
+To seed users/orgs into the database (does NOT seed micro-app data):
 ```bash
 cd backend && python -m scripts.seed
+```
+
+## AI Pipeline Architecture
+All micro-app findings are now derived in real-time from the actual uploaded documents — **no canned/demo data**.
+
+### ECV Pipeline Stages
+| Stage | Module | What it does |
+|-------|--------|-------------|
+| classify | `pipeline/classify.py` | Gemini 2.5 Flash classifies every page → `ecv_documents` |
+| extract | `pipeline/extract.py` | Gemini 2.5 Pro extracts MISMO 3.6 fields → `ecv_extractions` |
+| validate | `pipeline/validate.py` | Claude Sonnet grades 58 ECV checks → `ecv_sections`/`ecv_line_items` |
+| score | `pipeline/title_exam_pipeline.py` etc. | Claude derives micro-app findings from document text |
+
+### Micro-app Derivation Pipelines (NEW)
+Each pipeline reads the full document text (up to 8000 chars/page via `page_utils.py`) and asks Claude Sonnet to generate structured findings:
+
+- **`title_exam_pipeline.py`** — reads TITLE_COMMITMENT → Schedule B exceptions, Schedule C requirements, warnings, checklist
+- **`income_pipeline.py`** — reads W2/PAYSTUB/TAX_RETURN → income sources, DTI obligations, findings
+- **`compliance_pipeline.py`** — reads LOAN_ESTIMATE/CLOSING_DISCLOSURE → TRID/RESPA compliance checks
+- **`title_search_pipeline.py`** — reads TITLE_COMMITMENT/WARRANTY_DEED/DEED_OF_TRUST → flags, property summary
+
+All pipelines are idempotent and failure-tolerant. Empty document text → empty tables → empty state UI (no errors).
+
+### Re-deriving Findings
+To re-derive AI findings for all completed packets (e.g. after clearing data):
+```bash
+cd backend && python -m scripts.rederive
 ```
