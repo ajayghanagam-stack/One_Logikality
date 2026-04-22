@@ -227,37 +227,29 @@ _CLASSIFY_CONCURRENCY = 5
 async def classify_packet(packet_id: uuid.UUID) -> list[ClassifiedDoc]:
     """Classify every page of a packet's uploaded PDFs.
 
-    First attempts Gemini/Vertex AI classification. If Vertex is unavailable
-    (e.g. no GOOGLE_CLOUD_PROJECT in this environment), falls back to a local
-    keyword-based heuristic classifier so the Documents tab always shows real
-    data derived from the actual uploaded files.
+    Returns a list of documents ready to insert as `EcvDocument` rows. The
+    caller (`_persist_findings`) decides how to handle failures; we raise
+    on unrecoverable errors so the caller can fall back to canned inventory
+    rather than silently producing an empty Documents tab.
     """
     pages = await _load_packet_pages(packet_id)
     if not pages:
         log.warning("classify: packet %s has no extractable pages", packet_id)
         return []
 
-    try:
-        adapter = get_vertex_adapter()
-        batches = list(_chunk(pages, _PAGES_PER_BATCH))
-        sem = asyncio.Semaphore(_CLASSIFY_CONCURRENCY)
+    adapter = get_vertex_adapter()
+    batches = list(_chunk(pages, _PAGES_PER_BATCH))
+    sem = asyncio.Semaphore(_CLASSIFY_CONCURRENCY)
 
-        async def _run(batch: list[_Page]) -> list[dict[str, Any]]:
-            async with sem:
-                return await _classify_batch(adapter=adapter, pages=batch)
+    async def _run(batch: list[_Page]) -> list[dict[str, Any]]:
+        async with sem:
+            return await _classify_batch(adapter=adapter, pages=batch)
 
-        batch_results = await asyncio.gather(*(_run(b) for b in batches))
-        classifications: list[dict[str, Any]] = [c for br in batch_results for c in br]
-        classifications.sort(key=lambda c: c["page_number"])
-        return _group_into_documents(classifications)
-    except Exception:
-        log.warning(
-            "classify: Vertex AI unavailable for %s — using heuristic classifier",
-            packet_id,
-        )
-        classifications = _heuristic_classify_pages(pages)
-        classifications.sort(key=lambda c: c["page_number"])
-        return _group_into_documents(classifications)
+    batch_results = await asyncio.gather(*(_run(b) for b in batches))
+    classifications: list[dict[str, Any]] = [c for br in batch_results for c in br]
+
+    classifications.sort(key=lambda c: c["page_number"])
+    return _group_into_documents(classifications)
 
 
 # --- PDF reading ------------------------------------------------------------

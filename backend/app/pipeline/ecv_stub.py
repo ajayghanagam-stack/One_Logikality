@@ -67,7 +67,6 @@ from app.pipeline.compliance_data import (
 )
 from app.pipeline.ecv_data import (
     CONFIRMATION_BY_PROGRAM,
-    DOCUMENT_INVENTORY,
     ECV_LINE_ITEMS,
     ECV_SECTIONS,
 )
@@ -236,48 +235,25 @@ async def _persist_findings(packet_id: uuid.UUID) -> None:
         # M2: Real classification via Gemini Flash (Vertex AI). Reads the
         # uploaded PDFs, asks Gemini to label each page, groups consecutive
         # same-class pages into documents, and writes real EcvDocument rows.
-        # On failure (e.g. no AI keys) we fall back to the canned
-        # DOCUMENT_INVENTORY so the Documents tab still shows meaningful data.
-        try:
-            classified = await classify_packet(packet_id)
-            doc_rows: list[EcvDocument] = [
-                EcvDocument(
-                    packet_id=packet_id,
-                    org_id=org_id,
-                    doc_number=idx,
-                    name=doc["name"],
-                    mismo_type=doc["mismo_type"],
-                    pages_display=doc["pages_display"],
-                    page_count=doc["page_count"],
-                    confidence=doc["confidence"],
-                    status=doc["status"],
-                    category=doc["category"],
-                    page_issue_type=doc.get("page_issue_type"),
-                    page_issue_detail=doc.get("page_issue_detail"),
-                    page_issue_affected_page=doc.get("page_issue_affected_page"),
-                )
-                for idx, doc in enumerate(classified, start=1)
-            ]
-        except Exception:
-            log.exception("classify_packet failed for %s — using canned document inventory", packet_id)
-            doc_rows = [
-                EcvDocument(
-                    packet_id=packet_id,
-                    org_id=org_id,
-                    doc_number=doc["id"],
-                    name=doc["name"],
-                    mismo_type=doc["mismo_type"],
-                    pages_display=doc["pages"],
-                    page_count=doc["page_count"],
-                    confidence=doc["confidence"],
-                    status=doc["status"],
-                    category=doc["category"],
-                    page_issue_type=doc["page_issue"]["type"] if doc.get("page_issue") else None,
-                    page_issue_detail=doc["page_issue"]["detail"] if doc.get("page_issue") else None,
-                    page_issue_affected_page=doc["page_issue"]["affected_page"] if doc.get("page_issue") else None,
-                )
-                for doc in DOCUMENT_INVENTORY
-            ]
+        classified = await classify_packet(packet_id)
+        doc_rows: list[EcvDocument] = [
+            EcvDocument(
+                packet_id=packet_id,
+                org_id=org_id,
+                doc_number=idx,
+                name=doc["name"],
+                mismo_type=doc["mismo_type"],
+                pages_display=doc["pages_display"],
+                page_count=doc["page_count"],
+                confidence=doc["confidence"],
+                status=doc["status"],
+                category=doc["category"],
+                page_issue_type=doc.get("page_issue_type"),
+                page_issue_detail=doc.get("page_issue_detail"),
+                page_issue_affected_page=doc.get("page_issue_affected_page"),
+            )
+            for idx, doc in enumerate(classified, start=1)
+        ]
         session.add_all(doc_rows)
 
         # Compliance findings (US-6.3). The Compliance micro-app consumes
