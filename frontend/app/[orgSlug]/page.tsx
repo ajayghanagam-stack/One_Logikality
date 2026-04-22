@@ -41,6 +41,10 @@ type AppCoverageRow = {
   review_items: number;
   critical_items: number;
   score: number;
+  // "scored" = pipeline produced line items, render the % chip.
+  // "failed" = packet's pipeline errored, render a "Failed" marker
+  // instead of a misleading 0% score so users see which apps were hit.
+  state?: "scored" | "failed";
 };
 
 type PacketRow = {
@@ -339,8 +343,28 @@ function PacketRowItem({
         {packet.coverage && packet.coverage.length > 0 ? (
           <div style={coverageStripStyle}>
             {packet.coverage.map((row) => {
-              const colors = coverageChipColors(row.score);
               const label = COVERAGE_LABELS[row.app_id] ?? row.app_id;
+              if (row.state === "failed") {
+                // Failed-pipeline marker: distinct outline + "Failed"
+                // text so a row of these reads as "this packet errored
+                // for these apps", not "scored 0%".
+                return (
+                  <span
+                    key={row.app_id}
+                    title="Pipeline failed for this app — re-run the packet"
+                    style={{
+                      ...coverageChipStyle,
+                      color: "#991B1B",
+                      background: "#FFFFFF",
+                      borderColor: "#FCA5A5",
+                      borderStyle: "dashed",
+                    }}
+                  >
+                    {label} · Failed
+                  </span>
+                );
+              }
+              const colors = coverageChipColors(row.score);
               return (
                 <span
                   key={row.app_id}

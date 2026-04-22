@@ -124,6 +124,12 @@ class AppCoverageOut(BaseModel):
     / `review` / `critical` are the same severity buckets used by the
     global summary but scoped to one app so the Coverage card can render
     "Title Exam — 8/8 in scope, 82% score" at a glance.
+
+    `state` distinguishes "scored" chips (the pipeline produced line items
+    and the score is meaningful) from "failed" chips (the packet's pipeline
+    errored out, so there are no items to score and the home dashboard
+    should render a per-app failure marker instead of a misleading 0%).
+    Defaults to "scored" so existing scored-packet callers keep their shape.
     """
 
     app_id: str
@@ -132,6 +138,7 @@ class AppCoverageOut(BaseModel):
     review_items: int
     critical_items: int
     score: float
+    state: str = "scored"
 
 
 class PacketOut(BaseModel):
@@ -158,11 +165,16 @@ class PacketOut(BaseModel):
     # Review state (US-8.3). NULL until the customer records a decision.
     review: PacketReviewOut | None
     # Per-app score chips for the home dashboard. Only populated by the
-    # list endpoint (and only for completed packets that actually have
-    # line items); detail endpoints leave it None and rely on the
-    # dedicated `coverage` field on EcvDashboardOut. Same per-app
-    # filtering rules as the ECV detail Coverage card: each non-ECV chip
-    # averages only items tagged for that app; ECV is the catch-all.
+    # list endpoint; detail endpoints leave it None and rely on the
+    # dedicated `coverage` field on EcvDashboardOut. Three shapes:
+    #   - Completed packet with line items: scored chips, same per-app
+    #     filtering as the ECV detail Coverage card (each non-ECV chip
+    #     averages only items tagged for that app; ECV is the catch-all).
+    #   - Failed packet: one `state="failed"` chip per currently-enabled
+    #     app (ECV always included), counts/score zeroed — the frontend
+    #     renders these as a per-app failure marker.
+    #   - Anything else with no line items (uploaded / processing): None,
+    #     so the dashboard skips chips while the pipeline is in flight.
     coverage: list[AppCoverageOut] | None = None
 
 
@@ -541,19 +553,39 @@ def _packet_coverage_for_list(
 ) -> list[AppCoverageOut] | None:
     """Compute per-app coverage chips for the home dashboard packet list.
 
-    Returns None when there's nothing meaningful to show yet (no line
-    items — i.e. the pipeline hasn't produced scores for this packet),
-    so the frontend can cleanly skip rendering chips for in-flight or
-    failed packets without a "0%" placeholder.
+    Three shapes are returned, depending on packet state:
+      - `failed` packet: one `state="failed"` chip per currently-enabled
+        app (ECV always included). Counts/score are zero — the frontend
+        renders these as a "Failed — re-run" marker rather than a
+        misleading 0% score, so users can see *which* apps were affected.
+      - Completed packet with line items: normal `state="scored"` chips,
+        same per-app filtering rules as the ECV detail Coverage card.
+      - Anything else with no line items (uploaded / processing): None,
+        so the frontend cleanly skips rendering chips while the pipeline
+        is still in flight.
     """
-    if not line_items:
-        return None
     # Scope = the org's currently enabled apps. The packet's frozen
     # scoped_app_ids no longer gates display — every check is extracted
     # at pipeline time and dynamically surfaced for whichever apps the
     # org has on right now. ECV is always included.
     coverage_scope = set(enabled_subs)
     coverage_scope.add("ecv")
+
+    if packet.status == "failed":
+        return [
+            AppCoverageOut(
+                app_id=app_id,
+                total_items=0,
+                passed_items=0,
+                review_items=0,
+                critical_items=0,
+                score=0.0,
+                state="failed",
+            )
+            for app_id in sorted(coverage_scope)
+        ]
+    if not line_items:
+        return None
     return _compute_coverage(coverage_scope, line_items)
 
 

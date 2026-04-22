@@ -574,3 +574,96 @@ async def test_list_packets_drops_chip_when_app_disabled(
     assert second_apps == {"ecv"}
 
     await _cleanup_packets(org_id)
+
+
+async def _seed_packet(
+    *,
+    org_id: uuid.UUID,
+    created_by: uuid.UUID,
+    status: str,
+) -> uuid.UUID:
+    """Insert a packet at an arbitrary status with no derived rows.
+
+    Used to assert the list endpoint's coverage shape for non-completed
+    packets (failed pipelines and in-flight uploads).
+    """
+    async with SessionLocal() as session:
+        packet = Packet(
+            org_id=org_id,
+            declared_program_id="conventional",
+            status=status,
+            created_by=created_by,
+            scoped_app_ids=["compliance", "ecv"],
+        )
+        session.add(packet)
+        await session.commit()
+        return packet.id
+
+
+async def test_list_packets_failed_packet_returns_failed_chips(
+    client: AsyncClient, seeded, storage_tmp
+) -> None:
+    """A `failed` packet surfaces a per-app chip in `state="failed"` for
+    every currently-enabled app (ECV always included), so the home
+    dashboard can render a failure marker per app instead of leaving the
+    card silently empty or showing a misleading 0% score."""
+    org_id = seeded["org_id"]
+    await _subscribe(org_id, "compliance", enabled=True)
+    packet_id = await _seed_packet(
+        org_id=org_id,
+        created_by=seeded["customer_admin_id"],
+        status="failed",
+    )
+
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.get(
+        "/api/packets",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == str(packet_id)
+    assert rows[0]["status"] == "failed"
+
+    coverage = {row["app_id"]: row for row in rows[0]["coverage"]}
+    assert set(coverage) == {"ecv", "compliance"}
+    for chip in coverage.values():
+        assert chip["state"] == "failed"
+        assert chip["total_items"] == 0
+        assert chip["passed_items"] == 0
+        assert chip["review_items"] == 0
+        assert chip["critical_items"] == 0
+        assert chip["score"] == 0.0
+
+    await _cleanup_packets(org_id)
+
+
+async def test_list_packets_uncompleted_packet_omits_coverage(
+    client: AsyncClient, seeded, storage_tmp
+) -> None:
+    """Packets that haven't finished processing yet (no line items, not
+    failed) return `coverage=None`, so the dashboard cleanly skips
+    rendering chips while the pipeline is still in flight."""
+    org_id = seeded["org_id"]
+    await _subscribe(org_id, "compliance", enabled=True)
+    await _seed_packet(
+        org_id=org_id,
+        created_by=seeded["customer_admin_id"],
+        status="processing",
+    )
+
+    email, password = seeded["customer_admin"]
+    token = await _login(client, email, password)
+    resp = await client.get(
+        "/api/packets",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "processing"
+    assert rows[0]["coverage"] is None
+
+    await _cleanup_packets(org_id)
