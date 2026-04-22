@@ -453,6 +453,9 @@ function Dashboard({
   }, [sections, summary.critical_threshold, summary.confidence_threshold]);
 
 
+  // "Title" documents belong to Title Examination, not ECV.
+  // They will appear in the Title Exam micro-app view instead.
+  const TITLE_EXAM_CATEGORIES = new Set(["Title"]);
   const CATEGORY_ORDER = [
     "Application",
     "Credit",
@@ -460,16 +463,17 @@ function Dashboard({
     "Assets",
     "Employment",
     "Property",
-    "Title",
     "Disclosure",
     "Insurance",
     "Closing",
     "Other",
   ];
   const docsByCategory: Record<string, EcvDocument[]> = {};
-  documents.forEach((d) => {
-    (docsByCategory[d.category] ??= []).push(d);
-  });
+  documents
+    .filter((d) => !TITLE_EXAM_CATEGORIES.has(d.category))
+    .forEach((d) => {
+      (docsByCategory[d.category] ??= []).push(d);
+    });
 
   const overall = summary.overall_score;
   const stat = scoreStatus(overall);
@@ -600,7 +604,7 @@ function Dashboard({
             {
               key: "documents" as const,
               label: "Documents",
-              count: documents.length,
+              count: Object.values(docsByCategory).reduce((n, arr) => n + arr.length, 0),
               countColor: summary.documents_missing > 0 ? DESTRUCTIVE : SUCCESS,
             },
           ]
