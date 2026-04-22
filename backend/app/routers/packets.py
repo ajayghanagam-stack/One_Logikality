@@ -978,6 +978,34 @@ async def get_packet(
     )
 
 
+@router.delete("/{packet_id}")
+async def delete_packet(
+    packet_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_customer_role)],
+) -> Response:
+    """Permanently delete a packet and all its derived data."""
+    packet = (
+        await session.execute(select(Packet).where(Packet.id == packet_id))
+    ).scalar_one_or_none()
+    if packet is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="packet not found")
+
+    for model in [
+        EcvSection, EcvDocument, EcvExtraction,
+        ComplianceCheck, ComplianceFinding, ComplianceFeeTolerance, CompliancePacketMetadata,
+        IncomeSource, IncomeDtiItem, IncomeFinding, IncomePacketMetadata,
+        TitleFlag, TitleProperty, TitleExamException, TitleExamRequirement,
+        TitleExamWarning, TitleExamChecklistItem,
+        PacketFile,
+    ]:
+        await session.execute(delete(model).where(model.packet_id == packet_id))
+
+    await session.execute(delete(Packet).where(Packet.id == packet_id))
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/{packet_id}/ecv", response_model=EcvDashboardOut)
 async def get_packet_ecv(
     packet_id: uuid.UUID,

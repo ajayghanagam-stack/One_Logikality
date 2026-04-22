@@ -123,6 +123,10 @@ function PacketList({
     };
   }, [token]);
 
+  function handleDeleted(id: string) {
+    setPackets((prev) => prev?.filter((p) => p.id !== id) ?? prev);
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20, maxWidth: 920 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -165,7 +169,7 @@ function PacketList({
       ) : (
         <ul style={listStyle}>
           {packets.map((p) => (
-            <PacketRowItem key={p.id} packet={p} orgSlug={orgSlug} />
+            <PacketRowItem key={p.id} packet={p} orgSlug={orgSlug} token={token} onDeleted={handleDeleted} />
           ))}
         </ul>
       )}
@@ -173,7 +177,21 @@ function PacketList({
   );
 }
 
-function PacketRowItem({ packet, orgSlug }: { packet: PacketRow; orgSlug: string }) {
+function PacketRowItem({
+  packet,
+  orgSlug,
+  token,
+  onDeleted,
+}: {
+  packet: PacketRow;
+  orgSlug: string;
+  token: string | null;
+  onDeleted: (id: string) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   const programLabel = LOAN_PROGRAMS[packet.declared_program_id]?.label ?? packet.declared_program_id;
   const fileSummary =
     packet.files.length === 0
@@ -186,9 +204,57 @@ function PacketRowItem({ packet, orgSlug }: { packet: PacketRow; orgSlug: string
   const isCompleted = packet.status === "completed";
   const href = `/${orgSlug}/ecv?packet=${packet.id}`;
 
-  // Row is clickable when the packet has something to show. For
-  // processing/failed/uploaded we render a non-link row with a small
-  // hint so users understand why clicking doesn't navigate.
+  async function handleDelete(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api(`/api/packets/${packet.id}`, { method: "DELETE", token });
+      onDeleted(packet.id);
+    } catch (err) {
+      setDeleteError(
+        err instanceof ApiError
+          ? (err.detail ?? "Delete failed.")
+          : "Delete failed.",
+      );
+      setDeleting(false);
+      setConfirming(false);
+    }
+  }
+
+  const deleteControls = confirming ? (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+      <span style={{ fontSize: 12, color: chrome.mutedFg }}>Delete?</span>
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        style={deleteBtnConfirmStyle}
+      >
+        {deleting ? "…" : "Yes"}
+      </button>
+      <button
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirming(false); }}
+        style={deleteBtnCancelStyle}
+      >
+        No
+      </button>
+    </div>
+  ) : (
+    <button
+      onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirming(true); }}
+      title="Delete packet"
+      style={deleteIconBtnStyle}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+        <path d="M10 11v6M14 11v6"/>
+        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+      </svg>
+    </button>
+  );
+
   const body = (
     <div style={rowBodyStyle}>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, flex: 1 }}>
@@ -198,8 +264,12 @@ function PacketRowItem({ packet, orgSlug }: { packet: PacketRow; orgSlug: string
         <div style={{ color: chrome.mutedFg, fontSize: 12 }}>
           {programLabel} · uploaded {created}
         </div>
+        {deleteError && (
+          <div style={{ fontSize: 11, color: "#991B1B", marginTop: 2 }}>{deleteError}</div>
+        )}
       </div>
       <span style={statusPill.style}>{statusPill.label}</span>
+      {deleteControls}
     </div>
   );
 
@@ -314,4 +384,39 @@ const errorBoxStyle: React.CSSProperties = {
   border: "1px solid #FCA5A5",
   borderRadius: 8,
   fontSize: 13,
+};
+
+const deleteIconBtnStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 6,
+  background: "transparent",
+  border: "none",
+  borderRadius: 4,
+  color: chrome.mutedFg,
+  cursor: "pointer",
+  flexShrink: 0,
+};
+
+const deleteBtnConfirmStyle: React.CSSProperties = {
+  padding: "2px 10px",
+  background: "#DC2626",
+  color: "#fff",
+  border: "none",
+  borderRadius: 4,
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const deleteBtnCancelStyle: React.CSSProperties = {
+  padding: "2px 10px",
+  background: chrome.muted,
+  color: chrome.charcoal,
+  border: "none",
+  borderRadius: 4,
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
 };
