@@ -65,7 +65,7 @@ from app.pipeline.compliance_data import (
 from app.pipeline.compliance_data import (
     OVERALL_CONFIDENCE as COMPLIANCE_CONFIDENCE,
 )
-from app.pipeline.ecv_data import CONFIRMATION_BY_PROGRAM
+from app.pipeline.confirm import confirm_program
 from app.pipeline.extract import extract_packet
 from app.pipeline.income_data import (
     APPLIED_RULES as INCOME_APPLIED_RULES,
@@ -573,23 +573,6 @@ async def _persist_findings(packet_id: uuid.UUID) -> None:
         ]
         session.add_all(checklist_rows)
 
-        # Loan-program confirmation (US-3.11). Look up the canned verdict
-        # for the declared program and stamp it onto the packet row.
-        # Unknown program ids (shouldn't happen — the POST validates
-        # against LOAN_PROGRAM_IDS) fall through to NULLs.
-        confirmation = CONFIRMATION_BY_PROGRAM.get(declared_program_id)
-        if confirmation is not None:
-            await session.execute(
-                update(Packet)
-                .where(Packet.id == packet_id)
-                .values(
-                    program_confirmation_status=confirmation["status"],
-                    program_confirmation_suggested_id=confirmation.get("suggested_program_id"),
-                    program_confirmation_evidence=confirmation["evidence"],
-                    program_confirmation_documents=list(confirmation["documents_analyzed"]),
-                )
-            )
-
         await session.commit()
 
     # M3: Real MISMO 3.6 extraction via Gemini Pro. Runs AFTER the
@@ -601,6 +584,12 @@ async def _persist_findings(packet_id: uuid.UUID) -> None:
         await extract_packet(packet_id)
     except Exception:
         log.exception("extract_packet failed for %s", packet_id)
+
+    # M3b: Real AI-driven program confirmation. Runs after extraction so
+    # Gemini has access to the actual loan amount, document types, and
+    # extracted program identifiers. Failure is swallowed — columns stay
+    # NULL and the frontend renders the "Awaiting ECV" placeholder.
+    await confirm_program(packet_id)
 
     # M4: Real validate + score via Claude Sonnet. Reads back the docs
     # (classify output) + extractions (extract output) and grades the 58

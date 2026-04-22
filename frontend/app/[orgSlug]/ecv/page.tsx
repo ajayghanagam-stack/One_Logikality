@@ -2006,8 +2006,8 @@ function ConfirmationPill({
         tone="success"
         icon={<CheckIcon size={14} color={SUCCESS} />}
         eyebrow={`Declared · ${declaredProgramLabel}`}
-        body="Documents confirm this program"
-        detail={confirmation.evidence}
+        body={confirmation.evidence || "Documents confirm this program"}
+        detail={null}
         canChange={canChange}
         changeLabel="Change program"
         onChange={onChange}
@@ -2037,8 +2037,8 @@ function ConfirmationPill({
       tone="muted"
       icon={<InfoIcon size={14} color={chrome.mutedFg} />}
       eyebrow={`Declared · ${declaredProgramLabel}`}
-      body="Inconclusive — insufficient evidence in packet"
-      detail={confirmation.evidence}
+      body={confirmation.evidence || "Inconclusive — insufficient evidence in packet"}
+      detail={null}
       canChange={canChange}
       changeLabel="Change program"
       onChange={onChange}
