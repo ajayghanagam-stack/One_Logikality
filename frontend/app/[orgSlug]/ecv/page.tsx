@@ -496,89 +496,160 @@ function Dashboard({
   return (
     <div style={{ paddingBottom: 32 }}>
       {/* Hero */}
-      <section style={{ ...cardStyle, padding: 0, marginBottom: 20, overflow: "hidden", position: "relative" }}>
+      <section
+        style={{
+          ...cardStyle,
+          padding: 0,
+          marginBottom: 20,
+          overflow: "hidden",
+          position: "relative",
+          borderTop: `3px solid ${brand.teal}`,
+        }}
+      >
         <div
           style={{
             position: "absolute",
             top: 0,
             right: 0,
-            width: 300,
-            height: 200,
-            background: `radial-gradient(circle at top right, ${chrome.amber}10, transparent 70%)`,
+            width: 360,
+            height: 220,
+            background: `radial-gradient(circle at top right, ${brand.teal}08, transparent 65%)`,
             pointerEvents: "none",
           }}
         />
         <div
           style={{
-            padding: "24px 28px",
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "space-between",
-            gap: 24,
-            flexWrap: "wrap",
+            padding: "24px 28px 20px",
             position: "relative",
           }}
         >
-          <div style={{ flex: 1, minWidth: 280 }}>
-            <div
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              color: brand.teal,
+              letterSpacing: 1.4,
+              textTransform: "uppercase",
+              marginBottom: 8,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <span
               style={{
-                fontSize: 10,
-                fontWeight: 700,
-                color: chrome.amber,
-                letterSpacing: 1.2,
-                textTransform: "uppercase",
-                marginBottom: 6,
+                display: "inline-block",
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: brand.teal,
               }}
-            >
-              ECV Validation Report
-            </div>
-            <h1
-              style={{
-                fontSize: 24,
-                fontWeight: 700,
-                margin: "0 0 12px",
-                color: chrome.charcoal,
-                lineHeight: 1.2,
-                fontFamily: typography.fontFamily.primary,
-                overflowWrap: "anywhere",
-              }}
-              title={heroTitle}
-            >
-              {heroTitle}
-            </h1>
-            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 13 }}>
-              <HeroField
-                label="Program"
-                value={effectiveProgram?.label ?? effectiveProgramId}
-              />
-              <HeroField label="Status" value={packet.status} pill />
-              <HeroField label="Uploaded" value={uploaded} />
-            </div>
-            <div style={{ marginTop: 16 }}>
-              <ConfirmationPill
-                confirmation={packet.program_confirmation}
-                override={packet.program_override}
-                declaredProgramLabel={program?.label ?? packet.declared_program_id}
-                suggestedProgramLabel={
-                  packet.program_confirmation?.suggested_program_id
-                    ? (LOAN_PROGRAMS[packet.program_confirmation.suggested_program_id]?.label ??
-                      packet.program_confirmation.suggested_program_id)
-                    : null
-                }
-                canChange={canOverride}
-                onChange={() => setOverrideOpen(true)}
-                onReprocess={canOverride ? handleReprocess : undefined}
-              />
-            </div>
+            />
+            ECV Validation Report
           </div>
-          <div style={{ flexShrink: 0 }}>
-            {summary.audit_total_items > 0 ? (
-              <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 6, fontStyle: "italic" }}>
-                Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
-                {summary.audit_critical_items} critical across {summary.audit_total_items} ECV core check
-                {summary.audit_total_items === 1 ? "" : "s"} (not in score)
+          <h1
+            style={{
+              fontSize: 26,
+              fontWeight: 700,
+              margin: "0 0 16px",
+              color: chrome.charcoal,
+              lineHeight: 1.25,
+              fontFamily: typography.fontFamily.primary,
+              overflowWrap: "anywhere",
+            }}
+            title={heroTitle}
+          >
+            {heroTitle}
+          </h1>
+          <div
+            style={{
+              display: "flex",
+              gap: 0,
+              flexWrap: "wrap",
+              borderTop: `1px solid ${chrome.border}`,
+              paddingTop: 14,
+              marginTop: 4,
+            }}
+          >
+            {[
+              { label: "Program", value: effectiveProgram?.label ?? effectiveProgramId, pill: false },
+              { label: "Status", value: packet.status, pill: true },
+              { label: "Uploaded", value: uploaded, pill: false },
+            ].map((f, i) => (
+              <div
+                key={f.label}
+                style={{
+                  paddingRight: 24,
+                  marginRight: 24,
+                  borderRight: i < 2 ? `1px solid ${chrome.border}` : "none",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: chrome.mutedFg,
+                    letterSpacing: 0.9,
+                    textTransform: "uppercase",
+                    marginBottom: 4,
+                  }}
+                >
+                  {f.label}
+                </div>
+                {f.pill ? (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: brand.teal,
+                      background: `${brand.teal}14`,
+                      border: `1px solid ${brand.teal}30`,
+                      padding: "2px 10px",
+                      borderRadius: 10,
+                      textTransform: "capitalize",
+                      letterSpacing: 0.3,
+                    }}
+                  >
+                    {f.value.replace(/_/g, " ")}
+                  </span>
+                ) : (
+                  <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>{f.value}</div>
+                )}
               </div>
-            ) : null}
+            ))}
+            {summary.audit_total_items > 0 && (
+              <div style={{ marginLeft: "auto", alignSelf: "center" }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: chrome.mutedFg,
+                    background: chrome.muted,
+                    padding: "3px 10px",
+                    borderRadius: 4,
+                    border: `1px solid ${chrome.border}`,
+                  }}
+                >
+                  Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
+                  {summary.audit_critical_items} critical
+                </span>
+              </div>
+            )}
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <ConfirmationPill
+              confirmation={packet.program_confirmation}
+              override={packet.program_override}
+              declaredProgramLabel={program?.label ?? packet.declared_program_id}
+              suggestedProgramLabel={
+                packet.program_confirmation?.suggested_program_id
+                  ? (LOAN_PROGRAMS[packet.program_confirmation.suggested_program_id]?.label ??
+                    packet.program_confirmation.suggested_program_id)
+                  : null
+              }
+              canChange={canOverride}
+              onChange={() => setOverrideOpen(true)}
+              onReprocess={canOverride ? handleReprocess : undefined}
+            />
           </div>
         </div>
       </section>
@@ -597,7 +668,17 @@ function Dashboard({
       )}
 
       {/* Tab bar */}
-      <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${chrome.border}`, marginBottom: 20 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 6,
+          marginBottom: 16,
+          background: chrome.muted,
+          padding: 4,
+          borderRadius: 10,
+          width: "fit-content",
+        }}
+      >
         {(
           [
             { key: "review" as const, label: "Findings", count: itemsToReview.length, countColor: DESTRUCTIVE },
@@ -608,43 +689,47 @@ function Dashboard({
               countColor: summary.documents_missing > 0 ? DESTRUCTIVE : SUCCESS,
             },
           ]
-        ).map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            style={{
-              padding: "12px 20px",
-              fontSize: 13,
-              fontWeight: tab === t.key ? 600 : 500,
-              border: "none",
-              background: "none",
-              cursor: "pointer",
-              color: tab === t.key ? chrome.amber : chrome.mutedFg,
-              borderBottom: tab === t.key ? `2px solid ${chrome.amber}` : "2px solid transparent",
-              marginBottom: -2,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontFamily: typography.fontFamily.primary,
-            }}
-          >
-            {t.label}
-            <span
+        ).map((t) => {
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
               style={{
-                fontSize: 10,
-                fontWeight: 700,
-                color: tab === t.key ? "#fff" : t.countColor,
-                background: tab === t.key ? chrome.amber : chrome.muted,
-                padding: "2px 7px",
-                borderRadius: 10,
-                minWidth: 18,
-                textAlign: "center",
+                padding: "8px 16px",
+                fontSize: 13,
+                fontWeight: active ? 600 : 500,
+                border: "none",
+                background: active ? chrome.card : "transparent",
+                boxShadow: active ? "0 1px 4px rgba(20,18,14,0.08)" : "none",
+                borderRadius: 7,
+                cursor: "pointer",
+                color: active ? chrome.charcoal : chrome.mutedFg,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontFamily: typography.fontFamily.primary,
+                transition: "background 150ms, color 150ms",
               }}
             >
-              {t.count}
-            </span>
-          </button>
-        ))}
+              {t.label}
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: active ? (t.key === "review" ? DESTRUCTIVE : SUCCESS) : chrome.mutedFg,
+                  background: active ? (t.key === "review" ? DESTRUCTIVE_BG : SUCCESS_BG) : chrome.bg,
+                  padding: "1px 7px",
+                  borderRadius: 8,
+                  minWidth: 18,
+                  textAlign: "center",
+                }}
+              >
+                {t.count}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Tab content */}
@@ -743,16 +828,63 @@ function DocumentsTab({
   foundCount: number;
   missingCount: number;
 }) {
+  const activeCats = categoryOrder.filter((c) => docsByCategory[c]);
   return (
     <div style={cardStyle}>
-      <div style={{ padding: "14px 20px", borderBottom: `1px solid ${chrome.muted}` }}>
-        <div style={{ fontSize: 14, fontWeight: 700, color: chrome.charcoal }}>Document inventory</div>
-        <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 2 }}>
-          <span style={{ color: SUCCESS, fontWeight: 600 }}>{foundCount} found</span> ·{" "}
-          <span style={{ color: missingCount > 0 ? DESTRUCTIVE : chrome.mutedFg, fontWeight: 600 }}>
-            {missingCount} missing
-          </span>{" "}
-          · {categoryOrder.filter((c) => docsByCategory[c]).length} categories
+      {/* Header */}
+      <div
+        style={{
+          padding: "16px 20px",
+          borderBottom: `1px solid ${chrome.border}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 700, color: chrome.charcoal }}>
+          Document inventory
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: SUCCESS,
+              background: SUCCESS_BG,
+              border: `1px solid ${SUCCESS}30`,
+              padding: "3px 10px",
+              borderRadius: 12,
+            }}
+          >
+            {foundCount} found
+          </span>
+          {missingCount > 0 && (
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: DESTRUCTIVE,
+                background: DESTRUCTIVE_BG,
+                border: `1px solid ${DESTRUCTIVE}30`,
+                padding: "3px 10px",
+                borderRadius: 12,
+              }}
+            >
+              {missingCount} missing
+            </span>
+          )}
+          <span
+            style={{
+              fontSize: 11,
+              color: chrome.mutedFg,
+              background: chrome.muted,
+              padding: "3px 10px",
+              borderRadius: 12,
+            }}
+          >
+            {activeCats.length} {activeCats.length === 1 ? "category" : "categories"}
+          </span>
         </div>
       </div>
       {categoryOrder.map((cat) => {
@@ -765,46 +897,42 @@ function DocumentsTab({
             <div
               onClick={() => toggle(cat)}
               style={{
-                padding: "9px 20px",
+                padding: "10px 20px",
                 background: chrome.bg,
                 borderBottom: `1px solid ${chrome.muted}`,
                 display: "flex",
                 alignItems: "center",
                 gap: 10,
                 cursor: "pointer",
+                userSelect: "none",
               }}
             >
               <ChevronIcon open={!isCollapsed} color={chrome.mutedFg} />
               <span
                 style={{
-                  fontSize: 10,
+                  fontSize: 11,
                   fontWeight: 700,
-                  color: chrome.mutedFg,
-                  letterSpacing: 0.8,
+                  color: chrome.charcoal,
+                  letterSpacing: 0.4,
                   textTransform: "uppercase",
+                  flex: 1,
                 }}
               >
                 {cat}
               </span>
-              <span style={{ fontSize: 10, color: chrome.mutedFg }}>
-                {docs.length} doc{docs.length > 1 ? "s" : ""}
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: catMissing > 0 ? DESTRUCTIVE : chrome.mutedFg,
+                  background: catMissing > 0 ? DESTRUCTIVE_BG : chrome.muted,
+                  padding: "1px 8px",
+                  borderRadius: 8,
+                  border: catMissing > 0 ? `1px solid ${DESTRUCTIVE}20` : "none",
+                }}
+              >
+                {catMissing > 0 ? `${catMissing} missing` : `${docs.length}`}
               </span>
-              {catMissing > 0 && (
-                <span
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: DESTRUCTIVE,
-                    background: DESTRUCTIVE_BG,
-                    border: `1px solid ${DESTRUCTIVE}30`,
-                    padding: "1px 6px",
-                    borderRadius: 3,
-                    marginLeft: "auto",
-                  }}
-                >
-                  {catMissing} missing
-                </span>
-              )}
             </div>
             {!isCollapsed &&
               docs.map((doc) => <DocumentRow key={doc.id} doc={doc} />)}
@@ -1319,66 +1447,154 @@ function ReviewTab({
 
   if (items.length === 0) {
     return (
-      <div style={{ ...cardStyle, padding: "40px 20px", textAlign: "center" }}>
-        <CheckIcon size={32} color={SUCCESS} />
-        <div style={{ fontSize: 14, fontWeight: 600, color: chrome.charcoal, marginTop: 10 }}>
-          No findings — all checks passed.
+      <div
+        style={{
+          ...cardStyle,
+          padding: "48px 20px",
+          textAlign: "center",
+          borderTop: `3px solid ${SUCCESS}`,
+        }}
+      >
+        <CheckIcon size={36} color={SUCCESS} />
+        <div style={{ fontSize: 15, fontWeight: 600, color: chrome.charcoal, marginTop: 12 }}>
+          All checks passed
+        </div>
+        <div style={{ fontSize: 12, color: chrome.mutedFg, marginTop: 4 }}>
+          No findings to review for the currently enabled apps.
         </div>
       </div>
     );
   }
 
+  const criticalCount = items.filter((i) => i.confidence < criticalThreshold).length;
+  const reviewCount = items.length - criticalCount;
+
   return (
     <div style={cardStyle}>
-      <div style={{ padding: "14px 20px", borderBottom: `1px solid ${chrome.muted}` }}>
+      {/* Header */}
+      <div
+        style={{
+          padding: "16px 20px",
+          borderBottom: `1px solid ${chrome.border}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+        }}
+      >
         <div style={{ fontSize: 14, fontWeight: 700, color: chrome.charcoal }}>
           {items.length} finding{items.length === 1 ? "" : "s"}
         </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {criticalCount > 0 && (
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: DESTRUCTIVE,
+                background: DESTRUCTIVE_BG,
+                border: `1px solid ${DESTRUCTIVE}30`,
+                padding: "3px 10px",
+                borderRadius: 12,
+              }}
+            >
+              {criticalCount} critical
+            </span>
+          )}
+          {reviewCount > 0 && (
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: chrome.amberDark,
+                background: chrome.amberBg,
+                border: `1px solid ${chrome.amberLight}`,
+                padding: "3px 10px",
+                borderRadius: 12,
+              }}
+            >
+              {reviewCount} review
+            </span>
+          )}
+        </div>
       </div>
-      {groups.map(([section, groupItems]) => (
-        <div key={section}>
-          <div
-            style={{
-              padding: "8px 20px",
-              fontSize: 11,
-              fontWeight: 700,
-              letterSpacing: 0.6,
-              textTransform: "uppercase",
-              color: chrome.mutedFg,
-              background: chrome.bg,
-              borderBottom: `1px solid ${chrome.muted}`,
-            }}
-          >
-            {section}
-          </div>
-          {groupItems.map((it) => {
-            const isCritical = it.confidence < criticalThreshold;
-            const color = isCritical ? DESTRUCTIVE : chrome.amber;
-            return (
-              <div
-                key={it.id}
+      {groups.map(([section, groupItems]) => {
+        const groupCritical = groupItems.filter((i) => i.confidence < criticalThreshold).length;
+        return (
+          <div key={section}>
+            {/* Section header */}
+            <div
+              style={{
+                padding: "8px 20px",
+                background: chrome.bg,
+                borderBottom: `1px solid ${chrome.muted}`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <span
                 style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 14,
-                  padding: "12px 20px",
-                  borderBottom: `1px solid ${chrome.bg}`,
-                  borderLeft: `3px solid ${color}`,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: 0.5,
+                  textTransform: "uppercase",
+                  color: chrome.charcoal,
                 }}
               >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: chrome.charcoal }}>
-                    {it.check}
-                  </div>
-                  <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 3 }}>
-                    {it.result}
+                {section}
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: groupCritical > 0 ? DESTRUCTIVE : chrome.amberDark,
+                  background: groupCritical > 0 ? DESTRUCTIVE_BG : chrome.amberBg,
+                  padding: "1px 8px",
+                  borderRadius: 8,
+                }}
+              >
+                {groupItems.length}
+              </span>
+            </div>
+            {groupItems.map((it) => {
+              const isCritical = it.confidence < criticalThreshold;
+              const accentColor = isCritical ? DESTRUCTIVE : chrome.amber;
+              const bgColor = isCritical ? `${DESTRUCTIVE}04` : `${chrome.amber}04`;
+              return (
+                <div
+                  key={it.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 14,
+                    padding: "14px 20px 14px 17px",
+                    borderBottom: `1px solid ${chrome.muted}`,
+                    borderLeft: `3px solid ${accentColor}`,
+                    background: bgColor,
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: chrome.charcoal,
+                        marginBottom: 4,
+                      }}
+                    >
+                      {it.check}
+                    </div>
+                    <div style={{ fontSize: 12, color: chrome.mutedFg, lineHeight: 1.4 }}>
+                      {it.result}
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      ))}
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
