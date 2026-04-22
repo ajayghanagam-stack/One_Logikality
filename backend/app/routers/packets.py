@@ -1230,6 +1230,9 @@ async def get_packet_ecv(
     }
     enabled_subs.add("ecv")
     coverage_scope = scope_set & enabled_subs
+    # Force-include ecv even if a packet's stored scope is anomalous and
+    # somehow lacks it — ECV is foundational and must always render.
+    coverage_scope.add("ecv")
     coverage = _compute_coverage(coverage_scope, line_items)
     app_gating = await _compute_app_gating(session, packet.org_id, documents)
 
