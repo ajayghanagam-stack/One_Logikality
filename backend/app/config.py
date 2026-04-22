@@ -12,7 +12,9 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger(__name__)
@@ -32,14 +34,28 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Database
+    # Database — Replit provides postgresql:// but asyncpg requires postgresql+asyncpg://
     database_url: str = Field(alias="DATABASE_URL")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def ensure_asyncpg_scheme(cls, v: str) -> str:
+        # Convert plain postgresql:// to asyncpg dialect
+        if v.startswith("postgresql://") or v.startswith("postgres://"):
+            v = v.replace("://", "+asyncpg://", 1)
+        # Strip sslmode query param — asyncpg uses ssl=True/False, not sslmode
+        parsed = urlparse(v)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        params.pop("sslmode", None)
+        new_query = urlencode({k: vv[0] for k, vv in params.items()})
+        v = urlunparse(parsed._replace(query=new_query))
+        return v
 
     # Temporal
     temporal_address: str = Field(alias="TEMPORAL_ADDRESS", default="localhost:7234")
 
     # Auth
-    jwt_secret: str = Field(alias="JWT_SECRET")
+    jwt_secret: str = Field(alias="JWT_SECRET", default=INSECURE_JWT_DEFAULT)
     jwt_expiration_minutes: int = Field(alias="JWT_EXPIRATION_MINUTES", default=1440)
 
     # Storage
