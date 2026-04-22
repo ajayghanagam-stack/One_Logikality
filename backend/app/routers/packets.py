@@ -528,7 +528,14 @@ class EcvDocumentOut(BaseModel):
 
 
 class EcvSummaryOut(BaseModel):
-    """Top-line counts the dashboard hero / KPIs render without recomputing."""
+    """Top-line counts the dashboard hero / KPIs render without recomputing.
+
+    The headline severity counts (`total/passed/review/critical_items`) match
+    the gauge — they cover only items that *drive* the overall_score. Audit
+    items (in-scope but not score-driving — typically core ECV checks on a
+    micro-app-scoped packet) are tracked separately as `audit_*` so the hero
+    can tell a single coherent story without losing the audit signal.
+    """
 
     overall_score: float
     auto_approve_threshold: int
@@ -538,6 +545,10 @@ class EcvSummaryOut(BaseModel):
     passed_items: int
     review_items: int
     critical_items: int
+    audit_total_items: int = 0
+    audit_passed_items: int = 0
+    audit_review_items: int = 0
+    audit_critical_items: int = 0
     documents_found: int
     documents_missing: int
 
@@ -1188,14 +1199,27 @@ async def get_packet_ecv(
         else 0.0
     )
 
-    # Severity counts reflect in-scope items only — same logic as overall
-    # score. Out-of-scope items still ship to the client (for the
-    # collapsed group), they just don't drive red in the header KPIs.
-    critical = [i for i in in_scope_items if i.confidence < _CRITICAL_THRESHOLD]
-    review = [
-        i for i in in_scope_items if _CRITICAL_THRESHOLD <= i.confidence < _CONFIDENCE_THRESHOLD
-    ]
-    passed = [i for i in in_scope_items if i.confidence >= _CONFIDENCE_THRESHOLD]
+    # Headline severity counts match the gauge — they cover only items
+    # that drive the overall_score (e.g. just the title-exam-tagged items
+    # for a title-only packet). Audit items (in-scope core ECV checks
+    # that don't drive the score for this packet) are tracked separately
+    # so the hero tells one coherent story without losing the audit
+    # signal. Out-of-scope items don't appear in either bucket.
+    score_driving_items = [i for i in line_items if _item_drives_score(i)]
+    audit_items = [i for i in in_scope_items if not _item_drives_score(i)]
+
+    def _bucket(items: list[EcvLineItem]) -> tuple[int, int, int]:
+        crit = sum(1 for i in items if i.confidence < _CRITICAL_THRESHOLD)
+        rev = sum(
+            1
+            for i in items
+            if _CRITICAL_THRESHOLD <= i.confidence < _CONFIDENCE_THRESHOLD
+        )
+        passed = sum(1 for i in items if i.confidence >= _CONFIDENCE_THRESHOLD)
+        return passed, rev, crit
+
+    s_passed, s_review, s_critical = _bucket(score_driving_items)
+    a_passed, a_review, a_critical = _bucket(audit_items)
     missing_docs = sum(1 for d in documents if d.status == "missing")
 
     summary = EcvSummaryOut(
@@ -1203,10 +1227,14 @@ async def get_packet_ecv(
         auto_approve_threshold=_AUTO_APPROVE_THRESHOLD,
         confidence_threshold=_CONFIDENCE_THRESHOLD,
         critical_threshold=_CRITICAL_THRESHOLD,
-        total_items=len(in_scope_items),
-        passed_items=len(passed),
-        review_items=len(review),
-        critical_items=len(critical),
+        total_items=len(score_driving_items),
+        passed_items=s_passed,
+        review_items=s_review,
+        critical_items=s_critical,
+        audit_total_items=len(audit_items),
+        audit_passed_items=a_passed,
+        audit_review_items=a_review,
+        audit_critical_items=a_critical,
         documents_found=len(documents) - missing_docs,
         documents_missing=missing_docs,
     )

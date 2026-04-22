@@ -145,6 +145,10 @@ type Summary = {
   passed_items: number;
   review_items: number;
   critical_items: number;
+  audit_total_items: number;
+  audit_passed_items: number;
+  audit_review_items: number;
+  audit_critical_items: number;
   documents_found: number;
   documents_missing: number;
 };
@@ -591,12 +595,22 @@ function Dashboard({
               >
                 {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
               </div>
-              <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 200 }}>
+              <div style={{ fontSize: 13, color: chrome.charcoal, fontWeight: 500, lineHeight: 1.5, maxWidth: 220 }}>
                 Weighted across {sections.filter((s) => s.drives_score).length} selected-app section{sections.filter((s) => s.drives_score).length === 1 ? "" : "s"}
               </div>
               <div style={{ fontSize: 11, color: chrome.mutedFg, marginTop: 4 }}>
                 {summary.passed_items} passed · {summary.review_items} flagged · {summary.critical_items} critical
+                {summary.total_items > 0 ? (
+                  <> · {summary.total_items} scored check{summary.total_items === 1 ? "" : "s"}</>
+                ) : null}
               </div>
+              {summary.audit_total_items > 0 ? (
+                <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 6, fontStyle: "italic" }}>
+                  Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
+                  {summary.audit_critical_items} critical across {summary.audit_total_items} ECV core check
+                  {summary.audit_total_items === 1 ? "" : "s"} (not in score)
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
@@ -622,7 +636,7 @@ function Dashboard({
           label="Items to review"
           value={String(itemsToReview.length)}
           trend={{
-            text: `${summary.critical_items} critical · ${summary.review_items} amber`,
+            text: `${criticalItems.length} critical · ${reviewItems.length} amber`,
             color: DESTRUCTIVE,
           }}
         />
