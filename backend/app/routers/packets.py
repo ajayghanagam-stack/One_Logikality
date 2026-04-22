@@ -817,8 +817,8 @@ async def reprocess_packet(
     await session.execute(delete(EcvDocument).where(EcvDocument.packet_id == packet_id))
     await session.execute(delete(EcvExtraction).where(EcvExtraction.packet_id == packet_id))
 
-    # Reset packet to pending so the stub can walk through its stages again.
-    packet.status = "pending"
+    # Reset packet to uploaded so the stub can walk through its stages again.
+    packet.status = "uploaded"
     packet.current_stage = None
     packet.started_processing_at = None
     packet.completed_at = None
