@@ -581,18 +581,6 @@ function Dashboard({
             </div>
           </div>
           <div style={{ flexShrink: 0 }}>
-            <div
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                letterSpacing: 1.2,
-                textTransform: "uppercase",
-                color: stat.color,
-                marginBottom: 4,
-              }}
-            >
-              {stat.label === "REVIEW" ? "REVIEW REQUIRED" : stat.label}
-            </div>
             {summary.audit_total_items > 0 ? (
               <div style={{ fontSize: 10, color: chrome.mutedFg, marginTop: 6, fontStyle: "italic" }}>
                 Audit: {summary.audit_passed_items} passed · {summary.audit_review_items} flagged ·{" "}
